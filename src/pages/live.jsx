@@ -78,7 +78,7 @@ function LiveStream() {
       const verifyData = await verifyResponse.json();
       console.log("Verify response:", verifyData);
 
-      if (!verifyData.status || !verifyData.data.is_valid) {
+      if (!verifyData.status) {
         setVerificationError(
           verifyData.message || "Code tidak valid atau sudah kedaluwarsa"
         );
@@ -565,3 +565,4 @@ function LiveStream() {
 }
 
 export default LiveStream;
+
