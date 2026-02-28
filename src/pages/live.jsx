@@ -9,19 +9,17 @@ const ADMIN_PASS = "vzy";
 
 const apiFetch = (url, options = {}) => {
   const isGet = !options.method || options.method === "GET";
-  const headers = {
-    "x-api-key": API_KEY,
-    "apikey": API_KEY,
-    "username": ADMIN_USER,
-    "password": ADMIN_PASS,
-    ...(options.headers || {}),
-  };
 
-  if (!isGet && options.body) {
-    headers["Content-Type"] = "application/json";
-  }
+  // Inject ke query string
+  const separator = url.includes("?") ? "&" : "?";
+  const finalUrl =
+    url +
+    separator +
+    "apikey=" + API_KEY +
+    "&username=" + ADMIN_USER +
+    "&password=" + ADMIN_PASS;
 
-  // Inject apikey + admin credentials ke body jika POST
+  // Inject ke body jika POST
   let body = options.body;
   if (!isGet && body) {
     try {
@@ -33,9 +31,14 @@ const apiFetch = (url, options = {}) => {
     } catch (e) {}
   }
 
-  // Inject ke query string
-  const separator = url.includes("?") ? "&" : "?";
-  const finalUrl = url + separator + "apikey=" + API_KEY + "&username=" + ADMIN_USER + "&password=" + ADMIN_PASS;
+  const headers = {
+    ...(options.headers || {}),
+    "Content-Type": "application/json",
+    "x-api-key": API_KEY,
+    "apikey": API_KEY,
+    "username": ADMIN_USER,
+    "password": ADMIN_PASS,
+  };
 
   return fetch(finalUrl, {
     ...options,
