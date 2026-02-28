@@ -7,13 +7,19 @@ const API_KEY = "JKTCONNECT";
 
 const apiFetch = (url, options = {}) => {
   const isGet = !options.method || options.method === "GET";
+  const headers = {
+    "x-api-key": API_KEY,
+    ...(options.headers || {}),
+  };
+
+  // Hanya tambah Content-Type jika ada body (POST/PUT)
+  if (!isGet && options.body) {
+    headers["Content-Type"] = "application/json";
+  }
+
   return fetch(url, {
     ...options,
-    headers: {
-      "Content-Type": "application/json",
-      "x-api-key": API_KEY,
-      ...(options.headers || {}),
-    },
+    headers,
   });
 };
 
@@ -74,8 +80,14 @@ function LiveStream() {
       });
 
       // Step 1: Verifikasi code menggunakan API verify
+      // Kirim di query params DAN body untuk memastikan terbaca
+      const verifyParams = new URLSearchParams({
+        email: verificationData.email,
+        code: verificationData.code,
+        apikey: API_KEY,
+      });
       const verifyResponse = await apiFetch(
-        "https://v2.jkt48connect.com/api/codes/verify",
+        `https://v2.jkt48connect.com/api/codes/verify?${verifyParams}`,
         {
           method: "POST",
           body: JSON.stringify({
@@ -166,8 +178,13 @@ function LiveStream() {
       // Step 4: Code masih punya sisa usage, gunakan code
       console.log("Code is valid and has remaining usage, attempting to use...");
 
+      const useParams = new URLSearchParams({
+        email: verificationData.email,
+        code: verificationData.code,
+        apikey: API_KEY,
+      });
       const useResponse = await apiFetch(
-        "https://v2.jkt48connect.com/api/codes/use",
+        `https://v2.jkt48connect.com/api/codes/use?${useParams}`,
         {
           method: "POST",
           body: JSON.stringify({
