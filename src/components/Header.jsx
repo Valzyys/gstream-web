@@ -25,14 +25,14 @@ const Header = () => {
     kategori: false,
     akun: false,
     bantuan: false,
-    menu: false, // Tambahan untuk menu titik 3
+    menu: false,
   });
 
   const dropdownRefs = useRef({
     kategori: null,
     akun: null,
     bantuan: null,
-    menu: null, // Tambahan untuk menu titik 3
+    menu: null,
   });
 
   // Function to get cart count from localStorage
@@ -53,7 +53,6 @@ const Header = () => {
   // Function to check login status
   const checkAuthStatus = () => {
     try {
-      // Check for login data in sessionStorage
       const loginData = JSON.parse(
         sessionStorage.getItem("userLogin") || "null"
       );
@@ -63,7 +62,6 @@ const Header = () => {
         return;
       }
 
-      // Check for registration data in sessionStorage (auto-login after registration)
       const registrationData = JSON.parse(
         sessionStorage.getItem("userRegistration") || "null"
       );
@@ -76,7 +74,6 @@ const Header = () => {
         return;
       }
 
-      // Check for successful registration in localStorage (persistent)
       const successfulRegData = JSON.parse(
         localStorage.getItem("successfulRegistration") || "null"
       );
@@ -90,7 +87,6 @@ const Header = () => {
         return;
       }
 
-      // No valid authentication found
       setIsLoggedIn(false);
       setUserInfo(null);
     } catch (error) {
@@ -103,101 +99,61 @@ const Header = () => {
   // Function to handle logout
   const handleLogout = () => {
     try {
-      // Clear all authentication related data
       sessionStorage.removeItem("userLogin");
       sessionStorage.removeItem("userRegistration");
       sessionStorage.removeItem("authToken");
       localStorage.removeItem("successfulRegistration");
       localStorage.removeItem("registerFormData");
 
-      // Reset state
       setIsLoggedIn(false);
       setUserInfo(null);
-
-      // Close any open dropdowns
-      setDropdowns({
-        kategori: false,
-        akun: false,
-        bantuan: false,
-        menu: false,
-      });
-
-      // Close mobile menu
+      setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
       setIsMobileMenuOpen(false);
 
-      // Navigate to home page
       navigate("/");
-
-      console.log("User logged out successfully");
     } catch (error) {
       console.error("Error during logout:", error);
     }
   };
 
-  // Update cart count on component mount and when localStorage changes
+  // Update cart count
   useEffect(() => {
-    const updateCartCount = () => {
-      setCartCount(getCartCount());
-    };
-
-    // Initial count
+    const updateCartCount = () => setCartCount(getCartCount());
     updateCartCount();
-
-    // Listen for storage changes (when cart is updated from other tabs/components)
     const handleStorageChange = (e) => {
-      if (e.key === "cart") {
-        updateCartCount();
-      }
+      if (e.key === "cart") updateCartCount();
     };
-
     window.addEventListener("storage", handleStorageChange);
-
-    // Listen for custom cart update events (for same-tab updates)
-    const handleCartUpdate = () => {
-      updateCartCount();
-    };
-
-    window.addEventListener("cartUpdated", handleCartUpdate);
-
-    // Cleanup event listeners
+    window.addEventListener("cartUpdated", updateCartCount);
     return () => {
       window.removeEventListener("storage", handleStorageChange);
-      window.removeEventListener("cartUpdated", handleCartUpdate);
+      window.removeEventListener("cartUpdated", updateCartCount);
     };
   }, []);
 
-  // Check authentication status on component mount and when storage changes
+  // Check auth status
   useEffect(() => {
     checkAuthStatus();
-
-    // Listen for storage changes to update auth status
     const handleStorageChange = (e) => {
       if (
-        e.key === "userLogin" ||
-        e.key === "userRegistration" ||
-        e.key === "successfulRegistration"
+        ["userLogin", "userRegistration", "successfulRegistration"].includes(
+          e.key
+        )
       ) {
         checkAuthStatus();
       }
     };
-
     window.addEventListener("storage", handleStorageChange);
-
-    // Also check periodically for sessionStorage changes
     const authCheckInterval = setInterval(checkAuthStatus, 1000);
-
     return () => {
       window.removeEventListener("storage", handleStorageChange);
       clearInterval(authCheckInterval);
     };
   }, []);
 
-  // Also update cart count periodically (optional - for better UX)
+  // Periodic cart count update
   useEffect(() => {
-    const interval = setInterval(() => {
-      setCartCount(getCartCount());
-    }, 1000); // Check every second
-
+    const interval = setInterval(() => setCartCount(getCartCount()), 1000);
     return () => clearInterval(interval);
   }, []);
 
@@ -210,20 +166,14 @@ const Header = () => {
         menu: dropdownName === "menu" ? !prev.menu : false,
       };
 
-      // Auto-adjust dropdown position to prevent cutoff
       setTimeout(() => {
         const dropdownElement = dropdownRefs.current[dropdownName];
         if (dropdownElement && newState[dropdownName]) {
           const dropdownMenu = dropdownElement.querySelector(".dropdown-menu");
           if (dropdownMenu) {
             const dropdownRect = dropdownElement.getBoundingClientRect();
-            const menuRect = dropdownMenu.getBoundingClientRect();
             const viewportWidth = window.innerWidth;
-
-            // Reset classes first
             dropdownMenu.classList.remove("dropdown-menu-right");
-
-            // Check if dropdown would go off-screen to the right
             if (dropdownRect.left + 200 > viewportWidth - 20) {
               dropdownMenu.classList.add("dropdown-menu-right");
             }
@@ -241,108 +191,38 @@ const Header = () => {
       const isClickInsideDropdown = Object.values(dropdownRefs.current).some(
         (ref) => ref && ref.contains(event.target)
       );
-
       if (!isClickInsideDropdown) {
-        setDropdowns({
-          kategori: false,
-          akun: false,
-          bantuan: false,
-          menu: false,
-        });
+        setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
       }
     };
-
     document.addEventListener("mousedown", handleClickOutside);
-    return () => {
-      document.removeEventListener("mousedown", handleClickOutside);
-    };
+    return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Close mobile menu and dropdowns when window is resized
+  // Close on resize
   useEffect(() => {
     const handleResize = () => {
-      if (window.innerWidth > 768) {
-        setIsMobileMenuOpen(false);
-      }
-      setDropdowns({
-        kategori: false,
-        akun: false,
-        bantuan: false,
-        menu: false,
-      });
+      if (window.innerWidth > 768) setIsMobileMenuOpen(false);
+      setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
     };
-
     window.addEventListener("resize", handleResize);
-    return () => {
-      window.removeEventListener("resize", handleResize);
-    };
+    return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  // Modified handleCartClick function to navigate to /keranjang
-  const handleCartClick = () => {
-    console.log("Cart clicked - navigating to /keranjang");
-    navigate("/keranjang");
-  };
-
-  const handleNotificationClick = () => {
-    console.log("Notification clicked");
-  };
-
+  const handleCartClick = () => navigate("/keranjang");
+  const handleLogoClick = () => navigate("/");
+  const handleLoginClick = () => navigate("/login");
+  const handleRegisterClick = () => navigate("/register");
   const toggleMobileMenu = () => {
     setIsMobileMenuOpen(!isMobileMenuOpen);
-    // Close all dropdowns when mobile menu is toggled
-    setDropdowns({
-      kategori: false,
-      akun: false,
-      bantuan: false,
-      menu: false,
-    });
-  };
-
-  // Function to handle logo/beranda click
-  const handleLogoClick = () => {
-    navigate("/");
-  };
-
-  const handleBerandaClick = () => {
-    navigate("/");
-  };
-
-  const handleLoginClick = () => {
-    navigate("/login");
-  };
-
-  const handleRegisterClick = () => {
-    navigate("/register");
-  };
-
-  // Function to handle verify click
-  const handleVerifyClick = () => {
-    setDropdowns({
-      kategori: false,
-      akun: false,
-      bantuan: false,
-      menu: false,
-    });
-    navigate("/verify");
+    setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
   };
 
   return (
     <header>
-      {/* Top Bar */}
-      {/*<div className="top-bar">
-        <div>
-          <FaPhone className="phone-icon" />
-          0852-1514-7628
-          <FaEnvelope style={{ marginLeft: "20px" }} /> support@nayrakuen.com
-        </div>
-        <div>
-          <a href="#">Tentang Nayrakuen Shop</a>
-        </div>
-      </div>*/}
-
       {/* Navbar */}
       <nav className="navbar">
+        {/* Logo */}
         <div
           className="logo"
           onClick={handleLogoClick}
@@ -350,7 +230,131 @@ const Header = () => {
         >
           <span className="logo-bold">GSTREAM</span>
         </div>
+
+        {/* Desktop: Auth buttons atau user dropdown */}
+        <div className="nav-icons desktop-only">
+          {!isLoggedIn ? (
+            /* Belum login: tombol Masuk & Daftar */
+            <div className="auth-buttons">
+              <button
+                className="auth-btn login-btn"
+                onClick={handleLoginClick}
+              >
+                Masuk
+              </button>
+              <button
+                className="auth-btn register-btn"
+                onClick={handleRegisterClick}
+              >
+                Daftar
+              </button>
+            </div>
+          ) : (
+            /* Sudah login: dropdown akun */
+            <div
+              className={`dropdown ${dropdowns.akun ? "show" : ""}`}
+              ref={(el) => (dropdownRefs.current.akun = el)}
+            >
+              <button
+                className="icon-btn user-btn logged-in"
+                onClick={() => handleDropdownToggle("akun")}
+              >
+                <FaUser />
+                <span className="username">
+                  {userInfo?.username || userInfo?.full_name || "User"}
+                </span>
+                <FaChevronDown />
+              </button>
+
+              <div
+                className={`dropdown-menu dropdown-menu-right ${
+                  dropdowns.akun ? "show" : ""
+                }`}
+              >
+                {/* Info user */}
+                <div className="dropdown-user-info">
+                  <strong>
+                    {userInfo?.full_name || userInfo?.username || "User"}
+                  </strong>
+                  <small>{userInfo?.email || ""}</small>
+                </div>
+
+                <div className="dropdown-divider" />
+
+                <button
+                  className="dropdown-item"
+                  onClick={() => {
+                    setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
+                    navigate("/profile");
+                  }}
+                >
+                  <FaUser style={{ marginRight: 8 }} />
+                  Profil Saya
+                </button>
+
+                <div className="dropdown-divider" />
+
+                <button
+                  className="dropdown-item logout-btn"
+                  onClick={handleLogout}
+                >
+                  <FaSignOutAlt style={{ marginRight: 8 }} />
+                  Keluar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Mobile: hamburger button */}
+        <button className="mobile-menu-btn" onClick={toggleMobileMenu}>
+          {isMobileMenuOpen ? <FaTimes /> : <FaBars />}
+        </button>
       </nav>
+
+      {/* Mobile Menu */}
+      <div className={`mobile-menu ${isMobileMenuOpen ? "open" : ""}`}>
+        {!isLoggedIn ? (
+          /* Mobile: belum login */
+          <div className="mobile-auth-buttons mobile-only">
+            <button
+              className="mobile-auth-btn login"
+              onClick={() => {
+                setIsMobileMenuOpen(false);
+                handleLoginClick();
+              }}
+            >
+              Masuk
+            </button>
+            <button
+              className="mobile-auth-btn register"
+              onClick={() => {
+                setIsMobileMenuOpen(false);
+                handleRegisterClick();
+              }}
+            >
+              Daftar
+            </button>
+          </div>
+        ) : (
+          /* Mobile: sudah login */
+          <div className="mobile-user-section mobile-only">
+            <div className="mobile-user-info">
+              <FaUser className="user-icon" />
+              <div className="user-details">
+                <span className="username">
+                  {userInfo?.username || userInfo?.full_name || "User"}
+                </span>
+                <span className="email">{userInfo?.email || ""}</span>
+              </div>
+            </div>
+            <button className="mobile-logout-btn" onClick={handleLogout}>
+              <FaSignOutAlt />
+              Keluar
+            </button>
+          </div>
+        )}
+      </div>
     </header>
   );
 };
