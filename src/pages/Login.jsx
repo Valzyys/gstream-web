@@ -1,14 +1,18 @@
 import { useEffect, useState } from "react";
 import { useNavigate, Link } from "react-router-dom";
 
+const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
+const API_KEY = "JKTCONNECT";
+
 function Login() {
   const [loading, setLoading] = useState(false);
   const [formData, setFormData] = useState({
-    email: "",
+    login: "",
     password: "",
   });
   const [toast, setToast] = useState({ show: false, message: "", type: "" });
   const [focusedField, setFocusedField] = useState(null);
+  const [showPassword, setShowPassword] = useState(false);
   const navigate = useNavigate();
 
   useEffect(() => {
@@ -47,78 +51,54 @@ function Login() {
 
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setFormData((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setFormData((prev) => ({ ...prev, [name]: value }));
   };
 
   const validateForm = () => {
-    if (!formData.email.trim()) {
-      showToast("Email harus diisi", "error");
+    if (!formData.login.trim()) {
+      showToast("Username atau email harus diisi", "error");
       return false;
     }
-
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(formData.email)) {
-      showToast("Format email tidak valid", "error");
-      return false;
-    }
-
     if (!formData.password) {
       showToast("Password harus diisi", "error");
       return false;
     }
-
     return true;
   };
 
   const handleLogin = async (e) => {
     e.preventDefault();
-
-    if (!validateForm()) {
-      return;
-    }
+    if (!validateForm()) return;
 
     setLoading(true);
 
     try {
-      const requestBody = {
-        email: formData.email.trim(),
-        password: formData.password,
-      };
-
-      const response = await fetch(
-        "https://v2.jkt48connect.com/api/dashboard/login?username=vzy&password=vzy",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            Accept: "application/json",
-          },
-          body: JSON.stringify(requestBody),
-        }
-      );
-
-      const contentType = response.headers.get("content-type");
-      if (!contentType || !contentType.includes("application/json")) {
-        throw new Error("Server response is not JSON");
-      }
+      const response = await fetch(`${API_BASE}/auth/login?apikey=${API_KEY}`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          login: formData.login.toLowerCase().trim(),
+          password: formData.password,
+        }),
+      });
 
       const data = await response.json();
 
-      if (response.ok && data.status === true) {
+      if (data.status === true) {
         const loginData = {
           isLoggedIn: true,
-          token: data.data.token,
-          sessionId: data.data.session_id,
-          expiresAt: data.data.expires_at,
+          token: data.data.session?.access_token,
+          sessionId: data.data.session?.id,
+          expiresAt: data.data.session?.expires_at,
           user: data.data.user,
           loginAt: new Date().toISOString(),
         };
 
         sessionStorage.setItem("userLogin", JSON.stringify(loginData));
-        sessionStorage.setItem("authToken", data.data.token);
+        sessionStorage.setItem("authToken", data.data.session?.access_token);
 
         showToast("Login berhasil! Mengalihkan ke halaman utama...", "success");
 
@@ -126,19 +106,16 @@ function Login() {
           navigate("/");
         }, 1500);
       } else {
-        const errorMessage = data.message || "Login gagal. Silakan coba lagi.";
-        showToast(errorMessage, "error");
+        const attemptsMsg =
+          data.attempts_remaining !== undefined
+            ? ` (${data.attempts_remaining} percobaan tersisa)`
+            : "";
+        showToast((data.message || "Login gagal. Silakan coba lagi.") + attemptsMsg, "error");
       }
     } catch (error) {
-      console.error("Login error details:", error);
-
+      console.error("Login error:", error);
       if (error.name === "TypeError" && error.message.includes("fetch")) {
-        showToast(
-          "Tidak dapat terhubung ke server. Periksa koneksi internet Anda.",
-          "error"
-        );
-      } else if (error.message.includes("JSON")) {
-        showToast("Server memberikan respons yang tidak valid.", "error");
+        showToast("Tidak dapat terhubung ke server. Periksa koneksi internet Anda.", "error");
       } else {
         showToast("Terjadi kesalahan: " + error.message, "error");
       }
@@ -148,10 +125,7 @@ function Login() {
   };
 
   const handleReset = () => {
-    setFormData({
-      email: "",
-      password: "",
-    });
+    setFormData({ login: "", password: "" });
   };
 
   if (loading) {
@@ -196,89 +170,80 @@ function Login() {
             </svg>
           </div>
           <h1>Masuk Akun</h1>
-          <p>Silakan masuk dengan email untuk melanjutkan</p>
+          <p>Silakan masuk dengan username atau email untuk melanjutkan</p>
         </div>
 
         <div className="login-form-container">
           <form onSubmit={handleLogin} className="login-form" noValidate>
-            <div
-              className={`form-group ${
-                focusedField === "email" ? "focused" : ""
-              }`}
-            >
-              <label htmlFor="email">
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"></path>
-                  <polyline points="22,6 12,13 2,6"></polyline>
+
+            {/* Username / Email */}
+            <div className={`form-group ${focusedField === "login" ? "focused" : ""}`}>
+              <label htmlFor="login">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"></path>
+                  <circle cx="12" cy="7" r="4"></circle>
                 </svg>
-                Alamat Email
+                Username atau Email
               </label>
               <input
-                type="email"
-                id="email"
-                name="email"
-                value={formData.email}
+                type="text"
+                id="login"
+                name="login"
+                value={formData.login}
                 onChange={handleInputChange}
-                onFocus={() => setFocusedField("email")}
+                onFocus={() => setFocusedField("login")}
                 onBlur={() => setFocusedField(null)}
-                placeholder="nama@email.com"
+                placeholder="username / email@kamu.com"
                 className="form-input"
                 disabled={loading}
-                autoComplete="email"
+                autoComplete="username"
               />
-              <small className="form-hint">Masukkan email yang terdaftar</small>
+              <small className="form-hint">Masukkan username atau email yang terdaftar</small>
             </div>
 
-            <div
-              className={`form-group ${
-                focusedField === "password" ? "focused" : ""
-              }`}
-            >
+            {/* Password */}
+            <div className={`form-group ${focusedField === "password" ? "focused" : ""}`}>
               <label htmlFor="password">
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
-                  <rect
-                    x="3"
-                    y="11"
-                    width="18"
-                    height="11"
-                    rx="2"
-                    ry="2"
-                  ></rect>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
                   <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
                 </svg>
                 Password
               </label>
-              <input
-                type="password"
-                id="password"
-                name="password"
-                value={formData.password}
-                onChange={handleInputChange}
-                onFocus={() => setFocusedField("password")}
-                onBlur={() => setFocusedField(null)}
-                placeholder="Masukkan password"
-                className="form-input"
-                disabled={loading}
-                autoComplete="current-password"
-              />
+              <div className="input-with-toggle">
+                <input
+                  type={showPassword ? "text" : "password"}
+                  id="password"
+                  name="password"
+                  value={formData.password}
+                  onChange={handleInputChange}
+                  onFocus={() => setFocusedField("password")}
+                  onBlur={() => setFocusedField(null)}
+                  placeholder="Masukkan password"
+                  className="form-input"
+                  disabled={loading}
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  className="toggle-password-btn"
+                  onClick={() => setShowPassword((v) => !v)}
+                  tabIndex={-1}
+                >
+                  {showPassword ? (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/>
+                      <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/>
+                      <line x1="1" y1="1" x2="23" y2="23"/>
+                    </svg>
+                  ) : (
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+                      <circle cx="12" cy="12" r="3"/>
+                    </svg>
+                  )}
+                </button>
+              </div>
               <small className="form-hint">Password akun Anda</small>
             </div>
 
@@ -289,16 +254,7 @@ function Login() {
                 disabled={loading}
               >
                 <span>{loading ? "Memproses..." : "Masuk Sekarang"}</span>
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <line x1="5" y1="12" x2="19" y2="12"></line>
                   <polyline points="12 5 19 12 12 19"></polyline>
                 </svg>
@@ -310,16 +266,7 @@ function Login() {
                 onClick={handleReset}
                 disabled={loading}
               >
-                <svg
-                  width="18"
-                  height="18"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <polyline points="1 4 1 10 7 10"></polyline>
                   <polyline points="23 20 23 14 17 14"></polyline>
                   <path d="M20.49 9A9 9 0 0 0 5.64 5.64L1 10m22 4l-4.64 4.36A9 9 0 0 1 3.51 15"></path>
@@ -335,16 +282,7 @@ function Login() {
             <div className="form-links">
               <Link to="/register" className="link-card">
                 <div className="link-icon">
-                  <svg
-                    width="20"
-                    height="20"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  >
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M16 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
                     <circle cx="8.5" cy="7" r="4"></circle>
                     <line x1="20" y1="8" x2="20" y2="14"></line>
@@ -363,16 +301,7 @@ function Login() {
           <div className="login-inf">
             <div className="info-cardo">
               <div className="info-header">
-                <svg
-                  width="24"
-                  height="24"
-                  viewBox="0 0 24 24"
-                  fill="none"
-                  stroke="currentColor"
-                  strokeWidth="2"
-                  strokeLinecap="round"
-                  strokeLinejoin="round"
-                >
+                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                   <circle cx="12" cy="12" r="10"></circle>
                   <line x1="12" y1="16" x2="12" y2="12"></line>
                   <line x1="12" y1="8" x2="12.01" y2="8"></line>
@@ -382,7 +311,7 @@ function Login() {
               <ul className="info-list">
                 <li>
                   <span className="info-icon"></span>
-                  <span>Login menggunakan email terdaftar</span>
+                  <span>Login menggunakan username atau email terdaftar</span>
                 </li>
                 <li>
                   <span className="info-icon"></span>
@@ -437,12 +366,8 @@ function Login() {
         }
 
         @keyframes spin {
-          0% {
-            transform: rotate(0deg);
-          }
-          100% {
-            transform: rotate(360deg);
-          }
+          0% { transform: rotate(0deg); }
+          100% { transform: rotate(360deg); }
         }
 
         .login-container {
@@ -454,14 +379,8 @@ function Login() {
         }
 
         @keyframes fadeInUp {
-          from {
-            opacity: 0;
-            transform: translateY(30px);
-          }
-          to {
-            opacity: 1;
-            transform: translateY(0);
-          }
+          from { opacity: 0; transform: translateY(30px); }
+          to { opacity: 1; transform: translateY(0); }
         }
 
         .login-header {
@@ -480,24 +399,13 @@ function Login() {
           left: -50%;
           width: 200%;
           height: 200%;
-          background: radial-gradient(
-            circle,
-            rgba(255, 255, 255, 0.1) 0%,
-            transparent 70%
-          );
+          background: radial-gradient(circle, rgba(255,255,255,0.1) 0%, transparent 70%);
           animation: pulse 4s ease-in-out infinite;
         }
 
         @keyframes pulse {
-          0%,
-          100% {
-            transform: scale(1);
-            opacity: 0.5;
-          }
-          50% {
-            transform: scale(1.1);
-            opacity: 0.3;
-          }
+          0%, 100% { transform: scale(1); opacity: 0.5; }
+          50% { transform: scale(1.1); opacity: 0.3; }
         }
 
         .header-icon {
@@ -506,14 +414,8 @@ function Login() {
         }
 
         @keyframes fadeIn {
-          from {
-            opacity: 0;
-            transform: scale(0.5);
-          }
-          to {
-            opacity: 1;
-            transform: scale(1);
-          }
+          from { opacity: 0; transform: scale(0.5); }
+          to { opacity: 1; transform: scale(1); }
         }
 
         .login-header h1 {
@@ -579,6 +481,35 @@ function Login() {
 
         .form-group.focused label svg {
           transform: scale(1.1);
+        }
+
+        /* Input with toggle button wrapper */
+        .input-with-toggle {
+          position: relative;
+          display: flex;
+          align-items: center;
+        }
+
+        .input-with-toggle .form-input {
+          width: 100%;
+          padding-right: 48px;
+        }
+
+        .toggle-password-btn {
+          position: absolute;
+          right: 14px;
+          background: none;
+          border: none;
+          cursor: pointer;
+          color: #999;
+          display: flex;
+          align-items: center;
+          padding: 4px;
+          transition: color 0.2s;
+        }
+
+        .toggle-password-btn:hover {
+          color: #7b1c1c;
         }
 
         .form-input {
@@ -697,15 +628,8 @@ function Login() {
           gap: 4px;
         }
 
-        .link-text strong {
-          font-size: 15px;
-          color: #333;
-        }
-
-        .link-text span {
-          font-size: 13px;
-          color: #666;
-        }
+        .link-text strong { font-size: 15px; color: #333; }
+        .link-text span { font-size: 13px; color: #666; }
 
         .link-arrow {
           font-size: 24px;
@@ -750,30 +674,16 @@ function Login() {
           transition: width 0.6s ease, height 0.6s ease;
         }
 
-        .btn:hover::before {
-          width: 300px;
-          height: 300px;
-        }
-
-        .btn span,
-        .btn svg {
-          position: relative;
-          z-index: 1;
-        }
+        .btn:hover::before { width: 300px; height: 300px; }
+        .btn span, .btn svg { position: relative; z-index: 1; }
 
         .btn:hover:not(:disabled) {
           transform: translateY(-3px);
           box-shadow: 0 8px 20px rgba(0, 0, 0, 0.2);
         }
 
-        .btn:active:not(:disabled) {
-          transform: translateY(-1px);
-        }
-
-        .btn:disabled {
-          opacity: 0.6;
-          cursor: not-allowed;
-        }
+        .btn:active:not(:disabled) { transform: translateY(-1px); }
+        .btn:disabled { opacity: 0.6; cursor: not-allowed; }
 
         .btn-primary {
           background: linear-gradient(135deg, #7b1c1c 0%, #6a1818 100%);
@@ -797,9 +707,7 @@ function Login() {
           color: white;
         }
 
-        .btn-full {
-          width: 100%;
-        }
+        .btn-full { width: 100%; }
 
         .login-info {
           display: flex;
@@ -830,9 +738,7 @@ function Login() {
           border-bottom: 2px solid #dee2e6;
         }
 
-        .info-header svg {
-          color: #7b1c1c;
-        }
+        .info-header svg { color: #7b1c1c; }
 
         .info-header h3 {
           margin: 0;
@@ -858,24 +764,10 @@ function Login() {
           transition: all 0.3s ease;
         }
 
-        .info-list li:hover {
-          padding-left: 8px;
-          color: #7b1c1c;
-        }
-
-        .info-icon {
-          font-size: 18px;
-          flex-shrink: 0;
-          transition: transform 0.3s ease;
-        }
-
-        .info-list li:hover .info-icon {
-          transform: scale(1.2);
-        }
-
-        .info-list li:last-child {
-          border-bottom: none;
-        }
+        .info-list li:hover { padding-left: 8px; color: #7b1c1c; }
+        .info-icon { font-size: 18px; flex-shrink: 0; transition: transform 0.3s ease; }
+        .info-list li:hover .info-icon { transform: scale(1.2); }
+        .info-list li:last-child { border-bottom: none; }
 
         .toast {
           position: fixed;
@@ -890,14 +782,8 @@ function Login() {
         }
 
         @keyframes slideInRight {
-          from {
-            transform: translateX(120%);
-            opacity: 0;
-          }
-          to {
-            transform: translateX(0);
-            opacity: 1;
-          }
+          from { transform: translateX(120%); opacity: 0; }
+          to { transform: translateX(0); opacity: 1; }
         }
 
         .toast-success {
@@ -925,79 +811,33 @@ function Login() {
         }
 
         @keyframes bounceIn {
-          0% {
-            transform: scale(0);
-          }
-          50% {
-            transform: scale(1.2);
-          }
-          100% {
-            transform: scale(1);
-          }
+          0% { transform: scale(0); }
+          50% { transform: scale(1.2); }
+          100% { transform: scale(1); }
         }
 
-        .toast-message {
-          font-weight: 600;
-          font-size: 14px;
-          line-height: 1.5;
-        }
+        .toast-message { font-weight: 600; font-size: 14px; line-height: 1.5; }
 
         @media (max-width: 768px) {
-          .container {
-            padding: 15px;
-          }
-
-          .login-header {
-            padding: 40px 20px;
-          }
-
-          .login-header h1 {
-            font-size: 1.8rem;
-          }
-
+          .container { padding: 15px; }
+          .login-header { padding: 40px 20px; }
+          .login-header h1 { font-size: 1.8rem; }
           .login-form-container {
             grid-template-columns: 1fr;
             gap: 30px;
             padding: 30px 20px;
           }
-
-          .login-info {
-            order: -1;
-          }
-
-          .toast {
-            left: 15px;
-            right: 15px;
-            max-width: none;
-          }
+          .login-info { order: -1; }
+          .toast { left: 15px; right: 15px; max-width: none; }
         }
 
         @media (max-width: 480px) {
-          .login-header {
-            padding: 35px 15px;
-          }
-
-          .login-header h1 {
-            font-size: 1.6rem;
-          }
-
-          .login-form-container {
-            padding: 20px 15px;
-          }
-
-          .form-input {
-            font-size: 16px;
-            padding: 14px 16px;
-          }
-
-          .btn {
-            padding: 16px 20px;
-            font-size: 15px;
-          }
-
-          .info-card {
-            padding: 20px;
-          }
+          .login-header { padding: 35px 15px; }
+          .login-header h1 { font-size: 1.6rem; }
+          .login-form-container { padding: 20px 15px; }
+          .form-input { font-size: 16px; padding: 14px 16px; }
+          .btn { padding: 16px 20px; font-size: 15px; }
+          .info-card { padding: 20px; }
         }
       `}</style>
     </div>
