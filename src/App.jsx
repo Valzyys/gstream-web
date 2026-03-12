@@ -17,61 +17,65 @@ import LiveStream from "./pages/live";
 import Verify from "./pages/verify";
 import Replay from "./pages/replay";
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  MOBILE DETECTION — used to skip size-based checks on real phones
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  PESAN BLOKIR
+// ─────────────────────────────────────────────────────────────
+const BLOCKED_MSG = "lu ngapain kocak ini udah di secure sama JKT48Connect";
+
+// ─────────────────────────────────────────────────────────────
+//  DETEKSI MOBILE ASLI
+//  Butuh minimal 2 dari 3 sinyal agar dianggap mobile device
+//  sehingga tidak false-positive karena layar kecil
+// ─────────────────────────────────────────────────────────────
 const isMobileDevice = () => {
-  const ua              = navigator.userAgent || "";
-  const hasTouchPoints  = navigator.maxTouchPoints > 1;
-  const hasCoarsePointer = window.matchMedia?.("(pointer: coarse)").matches ?? false;
-  const mobileUA        = /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile/i.test(ua);
-  // Need ≥ 2 of 3 signals to be classified as real mobile device
-  const score = [hasTouchPoints, hasCoarsePointer, mobileUA].filter(Boolean).length;
-  return score >= 2;
+  const ua = navigator.userAgent || "";
+  return [
+    navigator.maxTouchPoints > 1,
+    window.matchMedia?.("(pointer: coarse)").matches ?? false,
+    /Android|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini|Mobile|mobile/i.test(ua),
+  ].filter(Boolean).length >= 2;
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  MEDIA KILLER
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  KILL MEDIA
+// ─────────────────────────────────────────────────────────────
 const killAllMedia = () => {
   try {
-    document.querySelectorAll("video, audio").forEach((el) => {
+    document.querySelectorAll("video,audio").forEach((el) => {
       try { el.pause(); el.src = ""; el.load(); } catch {}
     });
   } catch {}
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  DEVTOOLS DETECTION METHODS
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  DETEKSI DEVTOOLS
+//  Setiap method didesain aman di mobile (tidak trigger false positive)
+// ─────────────────────────────────────────────────────────────
 
-// Method 1: Window size diff — DESKTOP ONLY (skipped on mobile to prevent false positives)
+// Method 1 — window size gap (DESKTOP ONLY)
 const detectBySize = () => {
   if (isMobileDevice()) return false;
-  const THRESHOLD = 130;
   return (
-    window.outerWidth  - window.innerWidth  > THRESHOLD ||
-    window.outerHeight - window.innerHeight > THRESHOLD
+    window.outerWidth  - window.innerWidth  > 130 ||
+    window.outerHeight - window.innerHeight > 130
   );
 };
 
-// Method 2: console.log getter trick (works on all platforms)
-let _consoleDetected = false;
-const _devImg = (() => {
+// Method 2 — console getter trick (aman semua platform)
+let _cd = false;
+const _di = (() => {
   const img = new Image();
-  Object.defineProperty(img, "id", {
-    get() { _consoleDetected = true; return "x"; },
-  });
+  Object.defineProperty(img, "id", { get() { _cd = true; return "x"; } });
   return img;
 })();
 const detectByConsole = () => {
-  _consoleDetected = false;
-  window.console.log(_devImg);
+  _cd = false;
+  window.console.log(_di);
   window.console.clear();
-  return _consoleDetected;
+  return _cd;
 };
 
-// Method 3: toString/valueOf trick (works on all platforms)
+// Method 3 — toString/valueOf trick (aman semua platform)
 const detectByToString = () => {
   let hit = false;
   const o = { toString() { hit = true; return ""; }, valueOf() { hit = true; return 0; } };
@@ -80,7 +84,7 @@ const detectByToString = () => {
   return hit;
 };
 
-// Method 4: debugger timing — DESKTOP ONLY
+// Method 4 — debugger timing (DESKTOP ONLY)
 const detectByDebugger = () => {
   if (isMobileDevice()) return false;
   const t = performance.now();
@@ -89,124 +93,170 @@ const detectByDebugger = () => {
   return performance.now() - t > 100;
 };
 
-// Method 5: Firebug legacy
-const detectFirebug = () =>
-  !!(window.Firebug?.chrome?.isInitialized);
+// Method 5 — Firebug legacy
+const detectFirebug = () => !!(window.Firebug?.chrome?.isInitialized);
 
-// Aggregate fast (safe on mobile)
+// Fast aggregate (aman mobile)
 const runFastDetections = () => {
   try {
     return detectBySize() || detectByConsole() || detectByToString() || detectFirebug();
   } catch { return false; }
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  INPUT BLOCKERS
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  BLOKIR KEYBOARD SHORTCUTS & KLIK KANAN
+// ─────────────────────────────────────────────────────────────
 const blockContextMenu = (e) => { e.preventDefault(); e.stopPropagation(); return false; };
 
 const blockDevKeys = (e) => {
-  const key = e.key?.toLowerCase() ?? "";
-  if (e.keyCode === 123 || key === "f12") {
+  const k = e.key?.toLowerCase() ?? "";
+  // F12
+  if (e.keyCode === 123 || k === "f12") {
     e.preventDefault(); e.stopPropagation(); return false;
   }
-  if ((e.ctrlKey || e.metaKey) && e.shiftKey && ["i","j","c","k"].includes(key)) {
+  // Ctrl/Cmd + Shift + I/J/C/K
+  if ((e.ctrlKey || e.metaKey) && e.shiftKey && ["i","j","c","k"].includes(k)) {
     e.preventDefault(); e.stopPropagation(); return false;
   }
-  if ((e.ctrlKey || e.metaKey) && ["u","s","p"].includes(key)) {
+  // Ctrl/Cmd + U / S / P
+  if ((e.ctrlKey || e.metaKey) && ["u","s","p"].includes(k)) {
     e.preventDefault(); e.stopPropagation(); return false;
   }
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  ANTI-SCRAPING LAYER
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  ANTI-SCRAPING — pure frontend
+//  Karena pure frontend, scraper akan menerima HTML kosong
+//  (React SPA) — kita pastikan konten tidak bisa di-grab
+// ─────────────────────────────────────────────────────────────
 const applyAntiScraping = () => {
-  // 1. Disable text selection (except inputs)
+
+  // 1. Nonaktifkan seleksi teks (kecuali input/textarea)
   if (!document.getElementById("__as_css__")) {
     const s = document.createElement("style");
     s.id = "__as_css__";
     s.textContent = `
-      *{-webkit-user-select:none!important;-moz-user-select:none!important;user-select:none!important}
-      input,textarea{-webkit-user-select:text!important;user-select:text!important}
+      * { -webkit-user-select:none!important; user-select:none!important; }
+      input, textarea { -webkit-user-select:text!important; user-select:text!important; }
+      img { pointer-events:none!important; -webkit-user-drag:none!important; }
     `;
     document.head.appendChild(s);
   }
 
-  // 2. Block drag-to-copy
+  // 2. Blokir drag-to-copy
   document.addEventListener("dragstart", (e) => e.preventDefault(), { capture: true, passive: false });
 
-  // 3. Block copy/cut (allow in inputs)
+  // 3. Blokir copy/cut — racuni clipboard dengan BLOCKED_MSG
   const blockClip = (e) => {
     if (["INPUT","TEXTAREA"].includes(e.target?.tagName)) return;
     e.preventDefault();
     e.stopPropagation();
-    // Poison clipboard
-    try { navigator.clipboard?.writeText?.(""); } catch {}
+    try { navigator.clipboard?.writeText?.(BLOCKED_MSG); } catch {}
   };
-  document.addEventListener("copy", blockClip, { capture: true });
-  document.addEventListener("cut",  blockClip, { capture: true });
+  document.addEventListener("copy",  blockClip, { capture: true });
+  document.addEventListener("cut",   blockClip, { capture: true });
 
-  // 4. Block print
-  window.addEventListener("beforeprint", (e) => { e.preventDefault(); }, { capture: true });
+  // 4. Blokir print
+  window.addEventListener("beforeprint", (e) => e.preventDefault(), { capture: true });
   window.print = () => {};
 
-  // 5. Detect headless / bot UA
+  // 5. Deteksi bot / headless UA — tulis BLOCKED_MSG ke dokumen
   const ua = (navigator.userAgent || "").toLowerCase();
-  const botPatterns = [
+  const botUA = [
     "headless","phantomjs","selenium","puppeteer","playwright",
-    "webdriver","bot/","crawl","spider","scrapy","wget",
-    "python-requests","python-urllib","axios/","httpclient",
-    "libwww","java/1","go-http","ruby","perl/",
+    "webdriver","scrapy","wget","python-requests","python-urllib",
+    "axios/","node-fetch","got/","httpie","pycurl","aiohttp","httpx",
+    "curl/","libwww","java/1","go-http-client","postmanruntime","insomnia",
+    "mechanize","lwp-","zgrab","masscan","nikto","sqlmap",
   ];
-  if (botPatterns.some((p) => ua.includes(p))) {
-    document.documentElement.innerHTML = "";
+  if (botUA.some((p) => ua.includes(p))) {
+    document.open(); document.write(BLOCKED_MSG); document.close();
     window.stop?.();
     return;
   }
 
-  // 6. Block webdriver flag
+  // 6. Deteksi navigator.webdriver (Selenium/CDP flag)
   if (navigator.webdriver === true) {
-    document.documentElement.innerHTML = "";
+    document.open(); document.write(BLOCKED_MSG); document.close();
     window.stop?.();
     return;
   }
 
-  // 7. Detect automation globals
+  // 7. Deteksi globals injeksi otomasi
   const autoGlobals = [
     "__webdriver_evaluate","__selenium_evaluate","__webdriver_script_function",
     "__webdriver_script_func","__webdriver_script_fn","__fxdriver_evaluate",
     "__driver_unwrapped","__webdriver_unwrapped","__driver_evaluate",
     "__selenium_unwrapped","__fxdriver_unwrapped","callPhantom","_phantom",
-    "__nightmare","domAutomation","domAutomationController","_selenium","__$webdriverAsyncExecutor",
+    "__nightmare","domAutomation","domAutomationController",
+    "_selenium","__$webdriverAsyncExecutor","__lastWatirAlert",
   ];
   if (autoGlobals.some((g) => g in window)) {
-    document.documentElement.innerHTML = "";
+    document.open(); document.write(BLOCKED_MSG); document.close();
     window.stop?.();
     return;
   }
 
-  // 8. Override fetch to block direct API scraping from the page context
-  //    (prevents injected scripts from calling your APIs via fetch)
+  // 8. Override window.fetch — jika dipanggil dari konteks bot, kembalikan BLOCKED_MSG
+  const isBot = () =>
+    navigator.webdriver === true ||
+    botUA.some((p) => (navigator.userAgent || "").toLowerCase().includes(p)) ||
+    autoGlobals.some((g) => g in window);
+
   const _origFetch = window.fetch.bind(window);
   window.fetch = async (input, init) => {
-    const url = typeof input === "string" ? input : input?.url ?? "";
-    // Allow your own API calls — block everything else if webdriver is active
-    if (navigator.webdriver) throw new Error("Forbidden");
+    if (isBot()) {
+      return new Response(BLOCKED_MSG, {
+        status: 200,
+        headers: { "Content-Type": "text/plain; charset=utf-8" },
+      });
+    }
     return _origFetch(input, init);
   };
 
-  // 9. Override XMLHttpRequest similarly
+  // 9. Override XMLHttpRequest — jika bot, kembalikan BLOCKED_MSG
   const _origOpen = XMLHttpRequest.prototype.open;
-  XMLHttpRequest.prototype.open = function (...args) {
-    if (navigator.webdriver) throw new Error("Forbidden");
-    return _origOpen.apply(this, args);
+  const _origSend = XMLHttpRequest.prototype.send;
+
+  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
+    this._botBlocked = isBot();
+    if (!this._botBlocked) _origOpen.apply(this, [method, url, ...rest]);
   };
+
+  XMLHttpRequest.prototype.send = function (...args) {
+    if (this._botBlocked) {
+      Object.defineProperty(this, "readyState",  { get: () => 4,            configurable: true });
+      Object.defineProperty(this, "status",       { get: () => 200,          configurable: true });
+      Object.defineProperty(this, "responseText", { get: () => BLOCKED_MSG,  configurable: true });
+      Object.defineProperty(this, "response",     { get: () => BLOCKED_MSG,  configurable: true });
+      setTimeout(() => {
+        try { this.onreadystatechange?.(); } catch {}
+        try { this.onload?.(); }             catch {}
+      }, 10);
+      return;
+    }
+    _origSend.apply(this, args);
+  };
+
+  // 10. Deteksi iframe embedding — cegah hotlink/embedding di site lain
+  if (window.top !== window.self) {
+    try {
+      window.top.location.href = window.self.location.href;
+    } catch {
+      // Cross-origin iframe — blank it
+      document.open(); document.write(BLOCKED_MSG); document.close();
+    }
+  }
+
+  // 11. Cegah view-source dengan redirect
+  if (window.location.protocol === "view-source:") {
+    document.open(); document.write(BLOCKED_MSG); document.close();
+  }
 };
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  DevTools Blocker UI
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  DEVTOOLS BLOCKER UI
+// ─────────────────────────────────────────────────────────────
 function DevToolsBlocker() {
   useEffect(() => {
     killAllMedia();
@@ -218,44 +268,89 @@ function DevToolsBlocker() {
     <div
       onContextMenu={blockContextMenu}
       style={{
-        position:"fixed", inset:0, background:"#000",
-        zIndex:2147483647, display:"flex", flexDirection:"column",
-        alignItems:"center", justifyContent:"center", gap:"20px",
-        userSelect:"none", WebkitUserSelect:"none",
-        cursor:"not-allowed", fontFamily:"system-ui,sans-serif",
+        position:         "fixed",
+        inset:            0,
+        background:       "#000",
+        zIndex:           2147483647,
+        display:          "flex",
+        flexDirection:    "column",
+        alignItems:       "center",
+        justifyContent:   "center",
+        gap:              "20px",
+        userSelect:       "none",
+        WebkitUserSelect: "none",
+        cursor:           "not-allowed",
+        fontFamily:       "system-ui, -apple-system, sans-serif",
+        padding:          "24px",
+        boxSizing:        "border-box",
       }}
     >
-      <div style={{ fontSize:"clamp(48px,12vw,72px)" }}>🚫</div>
+      {/* Icon */}
+      <div style={{ fontSize: "clamp(52px, 14vw, 80px)", lineHeight: 1 }}>🚫</div>
+
+      {/* Judul */}
       <p style={{
-        color:"#fff", fontSize:"clamp(1.4rem,6vw,2.6rem)",
-        fontWeight:900, margin:0, letterSpacing:"4px",
-        textAlign:"center", textTransform:"uppercase", padding:"0 24px",
+        color:         "#fff",
+        fontSize:      "clamp(1.5rem, 7vw, 3rem)",
+        fontWeight:    900,
+        margin:        0,
+        letterSpacing: "4px",
+        textAlign:     "center",
+        textTransform: "uppercase",
       }}>
         Mau ngapain?
       </p>
+
+      {/* Pesan utama */}
       <p style={{
-        color:"#444", fontSize:"clamp(11px,3vw,13px)",
-        margin:0, textAlign:"center", padding:"0 40px", lineHeight:1.8,
+        color:      "#DC1F2E",
+        fontSize:   "clamp(13px, 4vw, 18px)",
+        fontWeight: 700,
+        margin:     0,
+        textAlign:  "center",
+        lineHeight: 1.7,
+        maxWidth:   "480px",
       }}>
-        Developer Tools terdeteksi.<br/>
-        Tutup DevTools untuk melanjutkan.
+        {BLOCKED_MSG}
       </p>
-      <div style={{ width:"60px", height:"3px", background:"#DC1F2E", borderRadius:"2px" }}/>
+
+      {/* Garis merah */}
+      <div style={{
+        width:        "60px",
+        height:       "3px",
+        background:   "#DC1F2E",
+        borderRadius: "2px",
+      }} />
+
+      {/* Sub-teks */}
+      <p style={{
+        color:     "#444",
+        fontSize:  "clamp(10px, 2.8vw, 13px)",
+        margin:    0,
+        textAlign: "center",
+        maxWidth:  "320px",
+        lineHeight: 1.7,
+      }}>
+        Tutup Developer Tools untuk melanjutkan.
+      </p>
     </div>
   );
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  Hook: useStrictDevToolsDetection
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  HOOK — useStrictDevToolsDetection (mobile-safe)
+//
+//  Mobile : hanya pakai console/toString trick, butuh 5 hit berturut
+//  Desktop: semua method, butuh 2 hit berturut
+// ─────────────────────────────────────────────────────────────
 function useStrictDevToolsDetection() {
-  const [detected,     setDetected]     = useState(false);
-  const lockedRef                       = useRef(false);
-  const consecutiveRef                  = useRef(0);
-  const fastIntervalRef                 = useRef(null);
-  const slowIntervalRef                 = useRef(null);
+  const [detected,     setDetected]  = useState(false);
+  const lockedRef                    = useRef(false);
+  const consecutiveRef               = useRef(0);
+  const fastIntervalRef              = useRef(null);
+  const slowIntervalRef              = useRef(null);
 
-  // Mobile needs more consecutive hits to avoid false positives
+  // Mobile butuh lebih banyak sinyal berturut untuk menghindari false positive
   const THRESHOLD = isMobileDevice() ? 5 : 2;
 
   const trigger = useCallback(() => {
@@ -273,39 +368,41 @@ function useStrictDevToolsDetection() {
   }, []);
 
   useEffect(() => {
+    // Jalankan anti-scraping sekali saat mount
     applyAntiScraping();
 
+    // Pasang blockers keyboard & klik kanan
     document.addEventListener("contextmenu", blockContextMenu, { capture: true });
     document.addEventListener("keydown",     blockDevKeys,      { capture: true });
     document.addEventListener("keyup",       blockDevKeys,      { capture: true });
 
-    // Fast poll — console/toString safe on all devices
+    // Fast poll — 400ms, pakai metode yang aman di mobile
     fastIntervalRef.current = setInterval(() => {
       if (lockedRef.current) return;
       runFastDetections() ? trigger() : resetCount();
     }, 400);
 
-    // Slow poll — debugger timing (desktop only)
+    // Slow poll — 3 detik, debugger timing (desktop only)
     slowIntervalRef.current = setInterval(() => {
       if (lockedRef.current) return;
       if (detectByDebugger()) trigger();
     }, 3000);
 
-    // Resize — desktop only
+    // Resize — hanya desktop
     const onResize = () => {
       if (lockedRef.current || isMobileDevice()) return;
       detectBySize() ? trigger() : resetCount();
     };
     window.addEventListener("resize", onResize);
 
-    // Visibility change
+    // Visibility change (user switch ke tab devtools)
     const onVisibility = () => {
       if (lockedRef.current) return;
       if (document.visibilityState === "visible" && runFastDetections()) trigger();
     };
     document.addEventListener("visibilitychange", onVisibility);
 
-    // Initial check — mobile uses only console-safe methods
+    // Initial check
     if (isMobileDevice()) {
       if (detectByConsole() || detectByToString()) trigger();
     } else {
@@ -326,11 +423,13 @@ function useStrictDevToolsDetection() {
   return detected;
 }
 
-// ══════════════════════════════════════════════════════════════════════════════
-//  App
-// ══════════════════════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+//  APP
+// ─────────────────────────────────────────────────────────────
 function App() {
   const devToolsOpen = useStrictDevToolsDetection();
+
+  // DevTools terdeteksi → tampilkan blocker, semua route tidak dirender
   if (devToolsOpen) return <DevToolsBlocker />;
 
   return (
@@ -360,23 +459,36 @@ function App() {
   );
 }
 
-// ── 404 ───────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+//  404
+// ─────────────────────────────────────────────────────────────
 function NotFound() {
   return (
     <div style={{
-      textAlign:"center", padding:"50px 20px", minHeight:"60vh",
-      display:"flex", flexDirection:"column", justifyContent:"center", alignItems:"center",
+      textAlign:      "center",
+      padding:        "50px 20px",
+      minHeight:      "60vh",
+      display:        "flex",
+      flexDirection:  "column",
+      justifyContent: "center",
+      alignItems:     "center",
     }}>
-      <h1 style={{ fontSize:"48px", color:"#e74c3c", marginBottom:"20px" }}>404</h1>
-      <h2 style={{ fontSize:"24px", marginBottom:"20px" }}>Halaman Tidak Ditemukan</h2>
-      <p style={{ fontSize:"16px", color:"#666", marginBottom:"30px" }}>
+      <h1 style={{ fontSize: "48px", color: "#e74c3c", marginBottom: "20px" }}>404</h1>
+      <h2 style={{ fontSize: "24px", marginBottom: "20px" }}>Halaman Tidak Ditemukan</h2>
+      <p style={{ fontSize: "16px", color: "#666", marginBottom: "30px" }}>
         Maaf, halaman yang Anda cari tidak dapat ditemukan.
       </p>
-      <a href="/" style={{
-        backgroundColor:"#3498db", color:"white",
-        padding:"12px 24px", textDecoration:"none",
-        borderRadius:"4px", fontSize:"16px",
-      }}>
+      <a
+        href="/"
+        style={{
+          backgroundColor: "#3498db",
+          color:           "white",
+          padding:         "12px 24px",
+          textDecoration:  "none",
+          borderRadius:    "4px",
+          fontSize:        "16px",
+        }}
+      >
         Kembali ke Beranda
       </a>
     </div>
