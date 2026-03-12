@@ -1,45 +1,217 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import MuxPlayer from "@mux/mux-player-react";
 import "../styles/live-stream.css";
 
+// ── DevTools Detection ────────────────────────────────────────────────────────
+function useDevToolsDetection() {
+  const [devToolsOpen, setDevToolsOpen] = useState(false);
+  const intervalRef = useRef(null);
+  const thresholdRef = useRef(160);
+
+  useEffect(() => {
+    // Method 1: window size difference (most reliable)
+    const checkBySize = () => {
+      const widthDiff  = window.outerWidth  - window.innerWidth;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      return widthDiff > thresholdRef.current || heightDiff > thresholdRef.current;
+    };
+
+    // Method 2: console timing trick
+    let devtoolsOpenByConsole = false;
+    const element = new Image();
+    Object.defineProperty(element, "id", {
+      get() {
+        devtoolsOpenByConsole = true;
+        return "";
+      },
+    });
+
+    const detect = () => {
+      devtoolsOpenByConsole = false;
+      // trigger console getter trick
+      console.log("%c", element);   // eslint-disable-line no-console
+      console.clear();              // eslint-disable-line no-console
+
+      const bySize    = checkBySize();
+      const byConsole = devtoolsOpenByConsole;
+      const detected  = bySize || byConsole;
+
+      setDevToolsOpen((prev) => {
+        if (prev !== detected) return detected;
+        return prev;
+      });
+    };
+
+    detect();
+    intervalRef.current = setInterval(detect, 500);
+
+    // Method 3: debugger timing
+    const debuggerCheck = () => {
+      const start = performance.now();
+      // eslint-disable-next-line no-debugger
+      debugger;
+      const delta = performance.now() - start;
+      if (delta > 100) setDevToolsOpen(true);
+    };
+    // run once
+    debuggerCheck();
+
+    return () => {
+      clearInterval(intervalRef.current);
+    };
+  }, []);
+
+  return devToolsOpen;
+}
+
+// ── DevTools Blocker UI ───────────────────────────────────────────────────────
+function DevToolsBlocker() {
+  // Stop any audio/video when this mounts
+  useEffect(() => {
+    document.querySelectorAll("video, audio").forEach((el) => {
+      try { el.pause(); el.src = ""; } catch {}
+    });
+  }, []);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0,
+      background: "#000",
+      zIndex: 999999,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      gap: "16px",
+      userSelect: "none",
+    }}>
+      <span style={{ fontSize: "52px" }}>🚫</span>
+      <p style={{
+        color: "#fff",
+        fontSize: "clamp(1.4rem, 4vw, 2.2rem)",
+        fontWeight: 800,
+        margin: 0,
+        letterSpacing: "2px",
+        textAlign: "center",
+        padding: "0 24px",
+      }}>
+        Mau ngapain?
+      </p>
+      <p style={{
+        color: "#555",
+        fontSize: "13px",
+        margin: 0,
+        textAlign: "center",
+        padding: "0 32px",
+      }}>
+        Tutup Developer Tools untuk melanjutkan.
+      </p>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
+const API_KEY  = "JKTCONNECT";
+
+/** Ambil session login dari sessionStorage (sama seperti ProfilePage) */
+const getSession = () => {
+  try {
+    const d = JSON.parse(sessionStorage.getItem("userLogin") || "null");
+    if (d && d.isLoggedIn && d.token) return d;
+    return null;
+  } catch { return null; }
+};
+
 function LiveStream() {
   const { playbackId } = useParams();
-  const navigate = useNavigate();
+  const navigate       = useNavigate();
 
-  // State untuk verifikasi
-  const [isVerified, setIsVerified] = useState(false);
-  const [showVerification, setShowVerification] = useState(false);
-  const [verificationData, setVerificationData] = useState({
-    email: "",
-    code: "",
-  });
+  // ── DevTools guard ────────────────────────────────────────────────────────
+  const devToolsOpen = useDevToolsDetection();
+
+  // ── Auth / membership state ───────────────────────────────────────────────
+  const [membershipChecked,  setMembershipChecked]  = useState(false);
+  const [hasMonthlymember,   setHasMonthlyMember]   = useState(false);
+  const [membershipLoading,  setMembershipLoading]  = useState(true);
+
+  // ── Verification state (fallback jika tidak punya membership) ────────────
+  const [isVerified,        setIsVerified]        = useState(false);
+  const [showVerification,  setShowVerification]  = useState(false);
+  const [verificationData,  setVerificationData]  = useState({ email: "", code: "" });
   const [verificationError, setVerificationError] = useState("");
-  const [verifying, setVerifying] = useState(false);
-  const [clientIP, setClientIP] = useState("");
+  const [verifying,         setVerifying]         = useState(false);
+  const [clientIP,          setClientIP]          = useState("");
 
-  // State untuk stream
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [streamData, setStreamData] = useState(null);
-  const [showInfo, setShowInfo] = useState(null);
-  const [members, setMembers] = useState([]);
+  // ── Stream state ──────────────────────────────────────────────────────────
+  const [loading,        setLoading]        = useState(true);
+  const [error,          setError]          = useState("");
+  const [streamData,     setStreamData]     = useState(null);
+  const [showInfo,       setShowInfo]       = useState(null);
+  const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
-  // Fungsi untuk mendapatkan IP address client
+  // ── Helpers ───────────────────────────────────────────────────────────────
   const fetchClientIP = async () => {
     try {
-      const response = await fetch("https://api.ipify.org?format=json");
-      const data = await response.json();
+      const res  = await fetch("https://api.ipify.org?format=json");
+      const data = await res.json();
       setClientIP(data.ip);
       return data.ip;
-    } catch (error) {
-      console.error("Error fetching IP:", error);
-      return "unknown";
-    }
+    } catch { return "unknown"; }
   };
 
-  // FIXED: Fungsi untuk verifikasi code dengan API
+  // ── Step 1: Cek membership dari session login ─────────────────────────────
+  const checkMembership = useCallback(async () => {
+    setMembershipLoading(true);
+    const session = getSession();
+
+    if (!session) {
+      // Tidak login → pakai alur verifikasi kode
+      setHasMonthlyMember(false);
+      setMembershipChecked(true);
+      setMembershipLoading(false);
+      return false;
+    }
+
+    const uid   = session.user?.user_id;
+    const token = session.token;
+
+    if (!uid || !token) {
+      setHasMonthlyMember(false);
+      setMembershipChecked(true);
+      setMembershipLoading(false);
+      return false;
+    }
+
+    try {
+      const res  = await fetch(
+        `${API_BASE}/membership/status/${uid}?apikey=${API_KEY}`,
+        { headers: { Authorization: `Bearer ${token}` } }
+      );
+      const data = await res.json();
+
+      if (
+        data.status &&
+        data.data?.is_active &&
+        data.data?.membership_type === "monthly"
+      ) {
+        setHasMonthlyMember(true);
+        setMembershipChecked(true);
+        setMembershipLoading(false);
+        return true;
+      }
+    } catch (e) {
+      console.error("Error checking membership:", e);
+    }
+
+    setHasMonthlyMember(false);
+    setMembershipChecked(true);
+    setMembershipLoading(false);
+    return false;
+  }, []);
+
+  // ── Verification code logic (tidak berubah dari versi lama) ──────────────
   const verifyAccess = async () => {
     if (!verificationData.email || !verificationData.code) {
       setVerificationError("Email dan code wajib diisi");
@@ -50,61 +222,42 @@ function LiveStream() {
     setVerificationError("");
 
     try {
-      // Dapatkan IP client
       const ip = clientIP || (await fetchClientIP());
 
-      console.log("Starting verification with:", {
-        email: verificationData.email,
-        code: verificationData.code,
-        ip: ip,
-      });
-
-      // Step 1: Verifikasi code menggunakan API verify
       const verifyResponse = await fetch(
         "https://v2.jkt48connect.com/api/codes/verify",
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            email: verificationData.email,
-            code: verificationData.code,
+            email:  verificationData.email,
+            code:   verificationData.code,
             apikey: "JKTCONNECT",
           }),
         }
       );
 
       const verifyData = await verifyResponse.json();
-      console.log("Verify response:", verifyData);
 
       if (!verifyData.status) {
-        setVerificationError(
-          verifyData.message || "Code tidak valid atau sudah kedaluwarsa"
-        );
+        setVerificationError(verifyData.message || "Code tidak valid atau sudah kedaluwarsa");
         setVerifying(false);
         return;
       }
 
       const codeData = verifyData.data;
 
-      // Step 2: Cek is_active terlebih dahulu
       if (!codeData.is_active) {
         setVerificationError("Code ini sudah tidak aktif");
         setVerifying(false);
         return;
       }
 
-      // Step 3: Cek usage_count vs usage_limit
-      const usageCount = parseInt(codeData.usage_count) || 0;
-      const usageLimit = parseInt(codeData.usage_limit) || 1;
+      const usageCount       = parseInt(codeData.usage_count) || 0;
+      const usageLimit       = parseInt(codeData.usage_limit)  || 1;
       const hasUsageRemaining = usageCount < usageLimit;
 
-      console.log(`Usage: ${usageCount}/${usageLimit}, hasRemaining: ${hasUsageRemaining}`);
-
-      // Jika usage sudah habis (is_used true DAN tidak ada sisa usage)
       if (codeData.is_used && !hasUsageRemaining) {
-        // Cek apakah IP sama (untuk allow re-login dari device yang sama)
         const listResponse = await fetch(
           `https://v2.jkt48connect.com/api/codes/list?email=${verificationData.email}&apikey=JKTCONNECT`
         );
@@ -116,30 +269,24 @@ function LiveStream() {
           );
 
           if (userCode) {
-            // Izinkan jika IP sama atau belum tercatat
             if (
               userCode.ip_address &&
               userCode.ip_address !== "" &&
               userCode.ip_address !== ip
             ) {
-              setVerificationError(
-                "Code ini sudah digunakan dari IP address yang berbeda"
-              );
+              setVerificationError("Code ini sudah digunakan dari IP address yang berbeda");
               setVerifying(false);
               return;
             }
 
-            // IP sama atau belum tercatat, izinkan akses
             const sessionData = {
-              email: verificationData.email,
-              code: verificationData.code,
-              ip: ip,
+              email:     verificationData.email,
+              code:      verificationData.code,
+              ip,
               timestamp: Date.now(),
-              verified: true,
+              verified:  true,
             };
-
             localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-
             setIsVerified(true);
             setShowVerification(false);
             setVerifying(false);
@@ -152,39 +299,30 @@ function LiveStream() {
         return;
       }
 
-      // Step 4: Code masih punya sisa usage, gunakan code
-      console.log("Code is valid and has remaining usage, attempting to use...");
-
       const useResponse = await fetch(
         "https://v2.jkt48connect.com/api/codes/use",
         {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            email: verificationData.email,
-            code: verificationData.code,
+            email:  verificationData.email,
+            code:   verificationData.code,
             apikey: "JKTCONNECT",
           }),
         }
       );
 
       const useData = await useResponse.json();
-      console.log("Use response:", useData);
 
       if (useData.status) {
-        // Berhasil menggunakan code - simpan session
         const sessionData = {
-          email: verificationData.email,
-          code: verificationData.code,
-          ip: ip,
+          email:     verificationData.email,
+          code:      verificationData.code,
+          ip,
           timestamp: Date.now(),
-          verified: true,
+          verified:  true,
         };
-
         localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-
         setIsVerified(true);
         setShowVerification(false);
         setVerifying(false);
@@ -192,202 +330,146 @@ function LiveStream() {
         setVerificationError(useData.message || "Gagal menggunakan code");
         setVerifying(false);
       }
-    } catch (error) {
-      console.error("Error verifying access:", error);
-      setVerificationError(
-        "Terjadi kesalahan saat verifikasi. Silakan coba lagi."
-      );
+    } catch {
+      setVerificationError("Terjadi kesalahan saat verifikasi. Silakan coba lagi.");
       setVerifying(false);
     }
   };
 
-  // FIXED: Fungsi untuk cek verifikasi yang sudah ada (DIPERMUDAH)
   const checkExistingVerification = async () => {
     const stored = localStorage.getItem("stream_verification");
-
-    if (!stored) {
-      console.log("No stored verification found");
-      setShowVerification(true);
-      return false;
-    }
+    if (!stored) { setShowVerification(true); return false; }
 
     try {
-      const verificationInfo = JSON.parse(stored);
-
-      // Cek apakah ada properti verified dan timestamp
-      if (!verificationInfo.verified || !verificationInfo.timestamp) {
-        console.log("Invalid verification data structure");
+      const info = JSON.parse(stored);
+      if (!info.verified || !info.timestamp) {
         localStorage.removeItem("stream_verification");
         setShowVerification(true);
         return false;
       }
 
-      // Cek apakah verifikasi masih valid (dalam 5 jam)
-      const hoursDiff = (Date.now() - verificationInfo.timestamp) / (1000 * 60 * 60);
-
+      const hoursDiff = (Date.now() - info.timestamp) / (1000 * 60 * 60);
       if (hoursDiff > 5) {
-        console.log("Verification expired (>5 hours)");
         localStorage.removeItem("stream_verification");
         setShowVerification(true);
         return false;
       }
-
-      // Langsung izinkan akses jika session masih valid
-      console.log("Session valid, granting access");
 
       const ip = await fetchClientIP();
-
-      // Update IP jika berbeda (untuk handle IP dinamis)
-      if (verificationInfo.ip !== ip) {
-        console.log("IP changed, updating session");
-        verificationInfo.ip = ip;
-        localStorage.setItem("stream_verification", JSON.stringify(verificationInfo));
+      if (info.ip !== ip) {
+        info.ip = ip;
+        localStorage.setItem("stream_verification", JSON.stringify(info));
       }
 
       setIsVerified(true);
       setShowVerification(false);
-      setVerificationData({
-        email: verificationInfo.email,
-        code: verificationInfo.code,
-      });
-
+      setVerificationData({ email: info.email, code: info.code });
       return true;
-    } catch (error) {
-      console.error("Error checking verification:", error);
+    } catch {
       localStorage.removeItem("stream_verification");
       setShowVerification(true);
       return false;
     }
   };
 
-  // Fungsi untuk mendapatkan show terdekat dari API
+  // ── Stream helpers ────────────────────────────────────────────────────────
   const fetchNearestShow = async () => {
     try {
-      const response = await fetch(
-        "https://v2.jkt48connect.com/api/jkt48/theater?apikey=JKTCONNECT"
-      );
-      const data = await response.json();
+      const res  = await fetch("https://v2.jkt48connect.com/api/jkt48/theater?apikey=JKTCONNECT");
+      const data = await res.json();
 
-      if (data.theater && data.theater.length > 0) {
+      if (data.theater?.length > 0) {
         const now = new Date();
         let nearestShow = null;
         let smallestDiff = Infinity;
-
         data.theater.forEach((show) => {
-          const showDate = new Date(show.date);
-          const diff = Math.abs(showDate - now);
-
-          if (diff < smallestDiff) {
-            smallestDiff = diff;
-            nearestShow = show;
-          }
+          const diff = Math.abs(new Date(show.date) - now);
+          if (diff < smallestDiff) { smallestDiff = diff; nearestShow = show; }
         });
-
         return nearestShow;
       }
-
       return null;
-    } catch (error) {
-      console.error("Error fetching show data:", error);
-      return null;
-    }
+    } catch { return null; }
   };
 
-  // Fungsi untuk mendapatkan lineup member dari API
   const fetchShowMembers = async (showId) => {
     try {
       setLoadingMembers(true);
-      const response = await fetch(
-        `https://v2.jkt48connect.com/api/jkt48/theater/${showId}?apikey=JKTCONNECT`
-      );
-      const data = await response.json();
-
-      if (data.shows && data.shows.length > 0 && data.shows[0].members) {
-        setMembers(data.shows[0].members);
-      }
-
+      const res  = await fetch(`https://v2.jkt48connect.com/api/jkt48/theater/${showId}?apikey=JKTCONNECT`);
+      const data = await res.json();
+      if (data.shows?.[0]?.members) setMembers(data.shows[0].members);
       setLoadingMembers(false);
-    } catch (error) {
-      console.error("Error fetching members:", error);
-      setLoadingMembers(false);
-    }
+    } catch { setLoadingMembers(false); }
   };
-
-  // Effect untuk inisialisasi
-  useEffect(() => {
-    const init = async () => {
-      await fetchClientIP();
-      const verified = await checkExistingVerification();
-
-      if (verified) {
-        loadStreamData();
-      } else {
-        setLoading(false);
-      }
-    };
-
-    init();
-  }, []);
-
-  // Effect untuk load stream data setelah verifikasi
-  useEffect(() => {
-    if (isVerified && !streamData) {
-      loadStreamData();
-    }
-  }, [isVerified]);
 
   const loadStreamData = async () => {
     try {
       setLoading(true);
-
-      if (!playbackId) {
-        setError("Playback ID tidak ditemukan");
-        setLoading(false);
-        return;
-      }
+      if (!playbackId) { setError("Playback ID tidak ditemukan"); setLoading(false); return; }
 
       const nearestShow = await fetchNearestShow();
-
       if (nearestShow) {
-        setShowInfo({
-          title: nearestShow.title,
-          showId: nearestShow.id,
-        });
+        setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
         await fetchShowMembers(nearestShow.id);
       }
 
       setTimeout(() => {
         setStreamData({
-          playbackId: playbackId,
-          title: nearestShow ? nearestShow.title : "Live Stream JKT48",
+          playbackId,
+          title:    nearestShow ? nearestShow.title : "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
         setLoading(false);
       }, 500);
-    } catch (error) {
-      console.error("Error loading stream:", error);
+    } catch {
       setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
       setLoading(false);
     }
   };
 
+  // ── Init ──────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const init = async () => {
+      await fetchClientIP();
+
+      // Cek membership monthly terlebih dahulu
+      const hasMonthly = await checkMembership();
+
+      if (hasMonthly) {
+        // ✅ Punya membership monthly → langsung load stream, skip verifikasi kode
+        setIsVerified(true);
+        setShowVerification(false);
+        loadStreamData();
+      } else {
+        // ❌ Tidak punya membership monthly → cek kode verifikasi seperti biasa
+        const verified = await checkExistingVerification();
+        if (verified) {
+          loadStreamData();
+        } else {
+          setLoading(false);
+        }
+      }
+    };
+
+    init();
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    if (isVerified && !streamData && membershipChecked) {
+      loadStreamData();
+    }
+  }, [isVerified, membershipChecked]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // ── UI Handlers ───────────────────────────────────────────────────────────
   const handleInputChange = (e) => {
     const { name, value } = e.target;
-    setVerificationData((prev) => ({
-      ...prev,
-      [name]: value,
-    }));
+    setVerificationData((prev) => ({ ...prev, [name]: value }));
     setVerificationError("");
   };
 
-  const handleVerificationSubmit = (e) => {
-    e.preventDefault();
-    verifyAccess();
-  };
+  const handleVerificationSubmit = (e) => { e.preventDefault(); verifyAccess(); };
 
-  const goBack = () => {
-    navigate(-1);
-  };
+  const goBack     = () => navigate(-1);
 
   const handleLogout = () => {
     localStorage.removeItem("stream_verification");
@@ -397,7 +479,25 @@ function LiveStream() {
     setVerificationData({ email: "", code: "" });
   };
 
-  // Tampilan Verifikasi
+  // ══════════════════════════════════════════════════════════════════════════
+  // DevTools aktif → tampilkan blocker, hentikan semua proses UI
+  // ══════════════════════════════════════════════════════════════════════════
+  if (devToolsOpen) return <DevToolsBlocker />;
+
+  // ── Membership loading ────────────────────────────────────────────────────
+  if (membershipLoading) {
+    return (
+      <div className="loading-container">
+        <div className="loading-content">
+          <div className="spinner-large"></div>
+          <h2>Memeriksa akses...</h2>
+          <p>Sedang memverifikasi membership kamu</p>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Verification screen ───────────────────────────────────────────────────
   if (showVerification && !isVerified) {
     return (
       <div className="verification-page">
@@ -410,24 +510,20 @@ function LiveStream() {
               <div className="form-group">
                 <label>Email</label>
                 <input
-                  type="email"
-                  name="email"
+                  type="email" name="email"
                   value={verificationData.email}
                   onChange={handleInputChange}
-                  placeholder="email@example.com"
-                  required
+                  placeholder="email@example.com" required
                 />
               </div>
 
               <div className="form-group">
                 <label>Verification Code</label>
                 <input
-                  type="text"
-                  name="code"
+                  type="text" name="code"
                   value={verificationData.code}
                   onChange={handleInputChange}
-                  placeholder="Masukkan code"
-                  required
+                  placeholder="Masukkan code" required
                 />
               </div>
 
@@ -437,8 +533,7 @@ function LiveStream() {
 
               {verifying ? (
                 <button type="button" className="verify-button" disabled>
-                  <span className="spinner"></span>
-                  Memverifikasi...
+                  <span className="spinner"></span> Memverifikasi...
                 </button>
               ) : (
                 <button type="submit" className="verify-button">
@@ -448,27 +543,32 @@ function LiveStream() {
             </form>
 
             <div className="verification-info">
-              <p>
-                !<strong>Informasi:</strong>
-              </p>
+              <p>!<strong>Informasi:</strong></p>
               <ul>
                 <li>Code verifikasi hanya dapat digunakan sekali</li>
                 <li>IP address akan dicatat untuk keamanan</li>
                 <li>Akses berlaku selama 5 jam</li>
                 <li>Session tetap aktif saat refresh halaman</li>
+                <li>
+                  Punya membership monthly?{" "}
+                  <span
+                    style={{ color: "#DC1F2E", cursor: "pointer", fontWeight: 700 }}
+                    onClick={() => navigate("/login")}
+                  >
+                    Login di sini
+                  </span>
+                </li>
               </ul>
             </div>
 
-            <button onClick={goBack} className="back-button">
-              ← Kembali
-            </button>
+            <button onClick={goBack} className="back-button">← Kembali</button>
           </div>
         </div>
       </div>
     );
   }
 
-  // Tampilan Loading
+  // ── Loading ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="loading-container">
@@ -481,7 +581,7 @@ function LiveStream() {
     );
   }
 
-  // Tampilan Error
+  // ── Error ─────────────────────────────────────────────────────────────────
   if (error || !streamData) {
     return (
       <div className="error-container">
@@ -489,22 +589,18 @@ function LiveStream() {
           <div className="error-icon"></div>
           <h2>Terjadi Kesalahan</h2>
           <p>{error || "Tidak dapat memuat live stream"}</p>
-          <button onClick={goBack} className="back-button">
-            ← Kembali
-          </button>
+          <button onClick={goBack} className="back-button">← Kembali</button>
         </div>
       </div>
     );
   }
 
-  // Tampilan Stream (setelah verifikasi berhasil)
+  // ── Stream (main) ─────────────────────────────────────────────────────────
   return (
     <div className="live-stream-page">
       {/* Header */}
       <div className="stream-header">
-        <button onClick={goBack} className="back-btn">
-          ← Kembali
-        </button>
+        <button onClick={goBack} className="back-btn">← Kembali</button>
 
         {showInfo && (
           <div className="show-title">
@@ -512,25 +608,38 @@ function LiveStream() {
           </div>
         )}
 
-        <button onClick={handleLogout} className="logout-btn">
-          Logout
-        </button>
+        {/* Tampilkan logout hanya untuk user yang masuk via kode (bukan membership) */}
+        {!hasMonthlymember && (
+          <button onClick={handleLogout} className="logout-btn">Logout</button>
+        )}
+
+        {/* Badge membership untuk user yang sudah login */}
+        {hasMonthlymember && (
+          <div style={{
+            display: "flex", alignItems: "center", gap: "6px",
+            background: "#DC1F2E18", border: "1px solid #DC1F2E40",
+            borderRadius: "20px", padding: "4px 12px",
+            fontSize: "12px", fontWeight: 700, color: "#DC1F2E",
+          }}>
+            ★ MONTHLY
+          </div>
+        )}
       </div>
 
-      {/* Player Container */}
+      {/* Player */}
       <div className="player-container">
         <MuxPlayer
           streamType="live"
           playbackId={streamData.playbackId}
           metadata={{
-            video_title: streamData.title,
+            video_title:    streamData.title,
             viewer_user_id: streamData.viewerId,
           }}
           autoPlay
         />
       </div>
 
-      {/* Lineup Members Section */}
+      {/* Lineup Members */}
       {members.length > 0 && (
         <div className="members-section">
           <div className="members-header">
