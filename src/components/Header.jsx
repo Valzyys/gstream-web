@@ -242,12 +242,6 @@ const Header = () => {
               >
                 Masuk
               </button>
-              <button
-                className="auth-btn register-btn"
-                onClick={handleRegisterClick}
-              >
-                Daftar
-              </button>
             </div>
           ) : (
             /* Sudah login: dropdown akun */
@@ -360,3 +354,4 @@ const Header = () => {
 };
 
 export default Header;
+
