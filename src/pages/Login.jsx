@@ -266,19 +266,26 @@ function Login() {
 
       <style>{`
         .lp-wrapper {
-          max-width: 1000px;
-          margin: 0 auto;
-          padding: 20px;
+          width: 100%;
           min-height: 100vh;
           display: flex;
           flex-direction: column;
           justify-content: center;
+          align-items: center;
           background: linear-gradient(135deg, #f5f7fa 0%, #e8eef3 100%);
+          padding: 20px;
           box-sizing: border-box;
+        }
+
+        .lp-card {
+          width: 100%;
+          max-width: 1000px;
         }
 
         /* Card */
         .lp-card {
+          width: 100%;
+          max-width: 1000px;
           background: white;
           border-radius: 20px;
           box-shadow: 0 10px 40px rgba(0,0,0,0.08);
