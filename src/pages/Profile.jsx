@@ -1,973 +1,931 @@
-import React, { useState, useEffect } from 'react';
-import { User, Edit, Save, X, MapPin, Phone, Mail, Calendar, Building, Globe, Shield, Activity, Clock, Eye, EyeOff, ChevronDown } from 'lucide-react';
-import './ProfilePage.css'; // Import the CSS file
-import { useNavigate } from "react-router-dom";
+import React, { useState, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 
+const API_BASE = 'https://v2.jkt48connect.com/api/jkt48connect';
+const API_KEY = 'JKTCONNECT';
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+const formatDate = (s) => {
+  if (!s) return '—';
+  return new Date(s).toLocaleDateString('id-ID', {
+    year: 'numeric', month: 'long', day: 'numeric',
+  });
+};
+
+const formatRelative = (s) => {
+  if (!s) return '—';
+  const diff = Date.now() - new Date(s).getTime();
+  const mins = Math.floor(diff / 60000);
+  if (mins < 1) return 'Baru saja';
+  if (mins < 60) return `${mins} menit lalu`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs} jam lalu`;
+  const days = Math.floor(hrs / 24);
+  if (days < 7) return `${days} hari lalu`;
+  return formatDate(s);
+};
+
+const getMembershipColor = (type) => {
+  if (type === 'monthly') return '#DC1F2E';
+  if (type === 'weekly') return '#F59E0B';
+  if (type === 'ramadan') return '#7C3AED';
+  return '#555';
+};
+
+const getMembershipLabel = (type) => {
+  if (type === 'monthly') return 'MONTHLY';
+  if (type === 'weekly') return 'WEEKLY';
+  if (type === 'ramadan') return 'RAMADAN';
+  return 'FREE';
+};
+
+const getOrderStatusColor = (status) => {
+  if (status === 'paid') return '#2ECC71';
+  if (status === 'pending') return '#F59E0B';
+  if (status === 'failed' || status === 'expired') return '#DC1F2E';
+  return '#555';
+};
+
+// ── Get session from storage ──────────────────────────────────────────────────
+const getSession = () => {
+  try {
+    const data = JSON.parse(sessionStorage.getItem('userLogin') || 'null');
+    if (data && data.isLoggedIn && data.token) return data;
+    return null;
+  } catch {
+    return null;
+  }
+};
+
+// ── ProfilePage ───────────────────────────────────────────────────────────────
 const ProfilePage = () => {
-  const [profile, setProfile] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [editing, setEditing] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [success, setSuccess] = useState('');
-  const [activeTab, setActiveTab] = useState('profile');
-  const [showPassword, setShowPassword] = useState(false);
-  const [editingAddress, setEditingAddress] = useState(false);
-  const [addressSuggestions, setAddressSuggestions] = useState([]);
-  const [showSuggestions, setShowSuggestions] = useState(false);
-  const [searchingAddress, setSearchingAddress] = useState(false);
-  const [passwordData, setPasswordData] = useState({
-    currentPassword: '',
-    newPassword: '',
-    confirmPassword: ''
-  });
-  const [editableData, setEditableData] = useState({});
-  const [addressData, setAddressData] = useState({
-    alamat: '',
-    city: '',
-    province: '',
-    postal_code: '',
-    country: 'Indonesia'
-  });
-
   const navigate = useNavigate();
 
-  // Function to search address from HERE Maps API
-  const searchAddress = async (query) => {
-    if (query.length < 3) {
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
+  const [session, setSession] = useState(null);
+  const [profile, setProfile] = useState(null);
+  const [membership, setMembership] = useState(null);
+  const [notifications, setNotifications] = useState([]);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [orders, setOrders] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(false);
+  const [activeTab, setActiveTab] = useState('profile');
+  const [toast, setToast] = useState({ show: false, message: '', type: '' });
+
+  const showToast = (message, type = 'success') => {
+    setToast({ show: true, message, type });
+    setTimeout(() => setToast({ show: false, message: '', type: '' }), 3000);
+  };
+
+  const loadAll = useCallback(async () => {
+    const s = getSession();
+    if (!s) {
+      navigate('/login');
       return;
     }
-    setSearchingAddress(true);
-    try {
-      const apiKey = "ZcgqQFaE9azO73XJTasyhgHSVBST-aHpmj-VF4UM6sY"; // HERE Maps API Key
-      const url = `https://autosuggest.search.hereapi.com/v1/autosuggest?at=-6.2,106.8&q=${encodeURIComponent(
-        query
-      )}&limit=5&apiKey=${apiKey}`;
-      const res = await fetch(url);
-      const data = await res.json();
-      // Filter only addresses/places that have address
-      const suggestions = data.items.filter(
-        (item) => item.address && item.address.label
-      );
-      setAddressSuggestions(suggestions);
-      setShowSuggestions(suggestions.length > 0);
-    } catch (err) {
-      setAddressSuggestions([]);
-      setShowSuggestions(false);
-    } finally {
-      setSearchingAddress(false);
-    }
-  };
+    setSession(s);
 
-  // Handle address suggestion selection
-  const selectAddressSuggestion = (suggestion) => {
-    const address = suggestion.address;
-    setAddressData(prev => ({
-      ...prev,
-      alamat: address.label,
-      city: address.city || prev.city,
-      province: address.state || prev.province,
-      country: address.countryName || prev.country
-    }));
-    setShowSuggestions(false);
-    setAddressSuggestions([]);
-  };
+    const uid = s.user?.user_id;
+    const token = s.token;
 
-  // Get localStorage data for address
-  const getLocalStorageAddress = () => {
-    try {
-      const stored = localStorage.getItem('userAddress');
-      if (stored) {
-        return JSON.parse(stored);
-      }
-      return null;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Save address data to localStorage
-  const saveLocalStorageAddress = (addressData) => {
-    try {
-      localStorage.setItem('userAddress', JSON.stringify({
-        alamat: addressData.alamat,
-        postal_code: addressData.postal_code,
-        savedAt: new Date().toISOString()
-      }));
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Get data from localStorage
-  const getStoredData = () => {
-    try {
-      // Check for successful registration data first
-      const successfulReg = localStorage.getItem('successfulRegistration');
-      if (successfulReg) {
-        const regData = JSON.parse(successfulReg);
-        return {
-          username: regData.username,
-          email: regData.email,
-          full_name: regData.full_name
-        };
-      }
-
-      // Check for current form data
-      const formData = localStorage.getItem('registerFormData');
-      if (formData) {
-        const parsedData = JSON.parse(formData);
-        return parsedData;
-      }
-
-      // Check session storage for login data
-      const loginData = sessionStorage.getItem('userLogin');
-      if (loginData) {
-        const parsedLogin = JSON.parse(loginData);
-        return {
-          username: parsedLogin.user?.username,
-          email: parsedLogin.user?.email,
-          full_name: parsedLogin.user?.full_name
-        };
-      }
-
-      return null;
-    } catch (error) {
-      return null;
-    }
-  };
-
-  // Create mock profile from stored data when API fails
-  const createMockProfileFromStoredData = (storedData) => {
-    const localAddress = getLocalStorageAddress();
-    
-    const mockProfile = {
-      profile_id: 'local_' + Date.now(),
-      username: storedData.username || 'user',
-      email: storedData.email || 'user@example.com',
-      full_name: storedData.full_name || storedData.username || 'User',
-      alamat: localAddress?.alamat || storedData.alamat || '',
-      nomor_hp: storedData.nomor_hp || '',
-      city: storedData.city || '',
-      province: storedData.province || '',
-      postal_code: localAddress?.postal_code || storedData.postal_code || '',
-      country: storedData.country || 'Indonesia',
-      status_member: 'no',
-      account_type: 'regular',
-      is_active: true,
-      is_verified: false,
-      bio: '',
-      occupation: '',
-      company: '',
-      website: '',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
-    };
-
-    setProfile(mockProfile);
-    setupEditableData(mockProfile);
-    setupAddressData(mockProfile);
-    setSuccess('Displaying your profile from local storage data');
-    setLoading(false);
-  };
-
-  // Fetch only current user's profile
-  const fetchProfile = async () => {
-    setLoading(true);
-    setError('');
-
-    const storedData = getStoredData();
-    if (!storedData) {
-      setError('No profile data found. Please register or login first.');
-      setLoading(false);
+    if (!uid || !token) {
+      navigate('/login');
       return;
     }
 
     try {
-      let url = '';
-      let searchValue = '';
-      
-      // Try to get profile using stored username first, then email
-      if (storedData.username) {
-        url = `https://v2.jkt48connect.com/api/dashboard/public/profile/username/${encodeURIComponent(storedData.username)}?username=vzy&password=vzy`;
-        searchValue = storedData.username;
-      } else if (storedData.email) {
-        url = `https://v2.jkt48connect.com/api/dashboard/public/profile/email/${encodeURIComponent(storedData.email)}?username=vzy&password=vzy`;
-        searchValue = storedData.email;
-      } else {
-        throw new Error('No username or email found in stored data');
+      const [profileRes, membershipRes, notifRes, ordersRes] = await Promise.all([
+        fetch(`${API_BASE}/profile/${uid}?apikey=${API_KEY}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_BASE}/membership/status/${uid}?apikey=${API_KEY}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_BASE}/notifications/${uid}?limit=10&apikey=${API_KEY}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+        fetch(`${API_BASE}/order/list/${uid}?limit=5&apikey=${API_KEY}`, {
+          headers: { Authorization: `Bearer ${token}` },
+        }),
+      ]);
+
+      const [pData, mData, nData, oData] = await Promise.all([
+        profileRes.json(),
+        membershipRes.json(),
+        notifRes.json(),
+        ordersRes.json(),
+      ]);
+
+      if (pData.status) setProfile(pData.data);
+      if (mData.status) setMembership(mData.data);
+      if (nData.status) {
+        setNotifications(nData.data?.notifications || []);
+        setUnreadCount(nData.data?.unread_count || 0);
       }
-
-
-      const response = await fetch(url, {
-        method: 'GET',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-      });
-
-      const data = await response.json();
-      
-
-      if (response.ok && data.status) {
-        // Merge API data with localStorage address data
-        const localAddress = getLocalStorageAddress();
-        const profileData = {
-          ...data.data,
-          alamat: localAddress?.alamat || data.data.alamat,
-          postal_code: localAddress?.postal_code || data.data.postal_code
-        };
-        
-        setProfile(profileData);
-        setupEditableData(profileData);
-        setupAddressData(profileData);
-        setSuccess('Profile loaded from server');
-      } else {
-        // API failed, create mock profile from stored data
-        createMockProfileFromStoredData(storedData);
-      }
-    } catch (error) {
-      
-      // Network error - create mock profile from stored data
-      createMockProfileFromStoredData(storedData);
-      setError('Could not connect to server. Showing data from local storage.');
+      if (oData.status) setOrders(oData.data?.orders || []);
+    } catch (e) {
+      showToast('Gagal memuat data profil. Periksa koneksi internet.', 'error');
     } finally {
       setLoading(false);
+      setRefreshing(false);
     }
-  };
+  }, [navigate]);
 
-  // Setup editable data from profile
-  const setupEditableData = (profileData) => {
-    setEditableData({
-      username: profileData.username || '',
-      full_name: profileData.full_name || '',
-      bio: profileData.bio || '',
-      occupation: profileData.occupation || '',
-      company: profileData.company || '',
-      website: profileData.website || ''
-    });
-  };
-
-  // Setup address data from profile
-  const setupAddressData = (profileData) => {
-    setAddressData({
-      alamat: profileData.alamat || '',
-      city: profileData.city || '',
-      province: profileData.province || '',
-      postal_code: profileData.postal_code || '',
-      country: profileData.country || 'Indonesia'
-    });
-  };
-
-  // Auto-load user's own profile on mount
   useEffect(() => {
-    fetchProfile();
-  }, []);
+    loadAll();
+  }, [loadAll]);
 
-  // Handle input changes for editing
-  const handleInputChange = (e) => {
-    const { name, value } = e.target;
-    setEditableData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
-
-  // Handle address input changes
-  const handleAddressChange = (e) => {
-    const { name, value } = e.target;
-    setAddressData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-
-    // Trigger address search for alamat field
-    if (name === 'alamat') {
-      searchAddress(value);
-    }
-  };
-
-  // Handle password change form
-  const handlePasswordChange = (e) => {
-    const { name, value } = e.target;
-    setPasswordData(prev => ({
-      ...prev,
-      [name]: value
-    }));
-  };
-
-  // Update profile (Note: This would require authentication in real implementation)
-  const handleUpdateProfile = async (e) => {
-    e.preventDefault();
-    setError('Profile update is not available in public mode. Please log in to update your profile.');
-  };
-
-  // Update address using the API (only city, province, country) and localStorage (alamat, postal_code)
-  const handleUpdateAddress = async (e) => {
-    e.preventDefault();
-    setSaving(true);
-    setError('');
-    setSuccess('');
-
+  const handleLogout = async () => {
+    if (!window.confirm('Apakah kamu yakin ingin logout?')) return;
     try {
-      if (!addressData.alamat.trim()) {
-        setError('Address (alamat) is required');
-        return;
-      }
-
-      // Save alamat and postal_code to localStorage
-      saveLocalStorageAddress({
-        alamat: addressData.alamat,
-        postal_code: addressData.postal_code
-      });
-
-      // Get authentication token for API update
-      const token = localStorage.getItem('authToken') || sessionStorage.getItem('authToken');
-      
-      if (token) {
-        // Update city, province, country via API
-        const storedData = getStoredData();
-        let identifier = storedData.username || storedData.email;
-
-        const response = await fetch('https://v2.jkt48connect.com/api/dashboard/update-address/search?username=vzy&password=vzy', {
-          method: 'PUT',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${token}`
-          },
+      const s = getSession();
+      if (s?.token) {
+        await fetch(`${API_BASE}/auth/logout?apikey=${API_KEY}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            identifier: identifier,
-            address_data: {
-              alamat: addressData.alamat, // Don't send alamat to API
-              city: addressData.city,
-              province: addressData.province,
-              country: addressData.country
-              // Don't send postal_code to API
-            }
-          })
+            access_token: s.token,
+            user_id: s.user?.user_id,
+          }),
         });
-
-        const result = await response.json();
-
-        if (response.ok && result.status) {
-          // Update local profile data
-          setProfile(prev => ({
-            ...prev,
-            alamat: addressData.alamat,
-            city: addressData.city,
-            province: addressData.province,
-            postal_code: addressData.postal_code,
-            country: addressData.country,
-            updated_at: new Date().toISOString()
-          }));
-
-          setSuccess('Address updated successfully! Complete address and postal code saved locally.');
-        } else {
-          // API failed, but still update local data
-          setProfile(prev => ({
-            ...prev,
-            alamat: addressData.alamat,
-            postal_code: addressData.postal_code,
-            updated_at: new Date().toISOString()
-          }));
-
-          setSuccess('Address saved locally. Some fields may not sync to server without authentication.');
-        }
-      } else {
-        // No authentication, just update local data
-        setProfile(prev => ({
-          ...prev,
-          alamat: addressData.alamat,
-          postal_code: addressData.postal_code,
-          updated_at: new Date().toISOString()
-        }));
-
-        setSuccess('Address saved locally. Login to sync all address data to server.');
       }
-
-      setEditingAddress(false);
-      
-    } catch (error) {
-       
-      // Even if API fails, save to localStorage
-      setProfile(prev => ({
-        ...prev,
-        alamat: addressData.alamat,
-        postal_code: addressData.postal_code,
-        updated_at: new Date().toISOString()
-      }));
-
-      setSuccess('Address saved locally. Server update failed - please check your connection.');
-    } finally {
-      setSaving(false);
-    }
+    } catch {}
+    sessionStorage.removeItem('userLogin');
+    sessionStorage.removeItem('authToken');
+    localStorage.removeItem('successfulRegistration');
+    navigate('/');
   };
 
-  // Change password (Note: This would require authentication in real implementation)
-  const handleChangePassword = async (e) => {
-    e.preventDefault();
-    setError('Password change is not available in public mode. Please log in to change your password.');
-  };
-
-  // Format date for display
-  const formatDate = (dateString) => {
-    if (!dateString) return '-';
+  const markAllRead = async () => {
     try {
-      return new Date(dateString).toLocaleDateString('id-ID', {
-        year: 'numeric',
-        month: 'long',
-        day: 'numeric'
+      await fetch(`${API_BASE}/notifications/read?apikey=${API_KEY}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session?.token}` },
+        body: JSON.stringify({ user_id: session?.user?.user_id, mark_all: true }),
       });
+      setUnreadCount(0);
+      setNotifications((prev) => prev.map((n) => ({ ...n, is_read: true })));
+      showToast('Semua notifikasi ditandai dibaca');
     } catch {
-      return dateString;
+      showToast('Gagal menandai notifikasi', 'error');
     }
   };
 
-  // Get member status badge class based on API response
-  const getMemberStatusClass = (status) => {
-    if (status === 'no') return 'badge badge-basic';
-    switch (status) {
-      case 'premium': return 'badge badge-premium';
-      case 'vip': return 'badge badge-vip';
-      case 'gold': return 'badge badge-premium';
-      case 'silver': return 'badge badge-basic';
-      case 'basic': return 'badge badge-basic';
-      case 'yes': return 'badge badge-premium';
-      default: return 'badge badge-basic';
-    }
-  };
-
-  // Get member status display text
-  const getMemberStatusText = (status) => {
-    if (status === 'no') return 'NO MEMBER';
-    if (status === 'yes') return 'MEMBER';
-    return status?.toUpperCase() || 'NO MEMBER';
+  const handleRefresh = () => {
+    setRefreshing(true);
+    loadAll();
   };
 
   if (loading) {
     return (
-      <div className="loading-container">
-        <div className="loading-content">
-          <div className="loading-spinner"></div>
-          <p className="loading-text">Loading your profile...</p>
-        </div>
+      <div className="pp-loading">
+        <div className="pp-spinner" />
+        <p>Memuat profil...</p>
       </div>
     );
   }
 
   if (!profile) {
     return (
-      <div className="error-container">
-        <div className="error-content">
-          <div className="error-icon">⚠️</div>
-          <h2 className="error-title">Profile Not Found</h2>
-          <p className="error-message">{error || 'Failed to load your profile data'}</p>
-          <button 
-            onClick={() => fetchProfile()} 
-            className="btn btn-primary"
-          >
-            Try Again
-          </button>
-        </div>
+      <div className="pp-error">
+        <div className="pp-error__icon">⚠️</div>
+        <h2>Gagal Memuat Profil</h2>
+        <p>Pastikan kamu sudah login dan koneksi internet tersedia.</p>
+        <button className="pp-btn pp-btn--primary" onClick={() => navigate('/login')}>
+          Kembali ke Login
+        </button>
       </div>
     );
   }
 
+  const isPremium = membership?.is_active && membership?.membership_type !== 'free';
+  const memberColor = getMembershipColor(membership?.membership_type || 'free');
+  const memberLabel = getMembershipLabel(membership?.membership_type || 'free');
+  const initials = (profile.full_name || profile.username || 'U').slice(0, 2).toUpperCase();
+
   return (
-    <div className="profile-container">
-      <div className="profile-wrapper">
-        {/* Header */}
-        <div className="profile-header">
-          <div className="profile-header-content">
-            <div className="profile-header-info">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                <div className="profile-avatar">
-                  {profile.full_name ? profile.full_name.charAt(0).toUpperCase() : 'U'}
-                </div>
-                <div className="profile-details">
-                  <h1>{profile.full_name || profile.username}</h1>
-                  <p className="profile-username">@{profile.username}</p>
-                  <div className="profile-badges">
-                    <span className={getMemberStatusClass(profile.status_member)}>
-                      {getMemberStatusText(profile.status_member)}
-                    </span>
-                    {profile.is_verified && (
-                      <span className="badge badge-verified">
-                        <Shield style={{ width: '12px', height: '12px' }} />
-                        Verified
-                      </span>
-                    )}
-                  </div>
-                </div>
+    <div className="pp-wrapper">
+      {/* Toast */}
+      {toast.show && (
+        <div className={`pp-toast pp-toast--${toast.type}`}>
+          <span>{toast.type === 'success' ? '✅' : '❌'}</span>
+          <span>{toast.message}</span>
+        </div>
+      )}
+
+      <div className="pp-container">
+        {/* ── HERO CARD ─────────────────────────────────────────────────── */}
+        <div className="pp-hero">
+          <div className="pp-hero__top">
+            <div className="pp-hero__avatar-wrap">
+              {profile.avatar ? (
+                <img src={profile.avatar} alt="avatar" className="pp-hero__avatar-img" />
+              ) : (
+                <div className="pp-hero__avatar-initials">{initials}</div>
+              )}
+              {profile.is_verified && (
+                <div className="pp-hero__verified-dot" title="Verified">✓</div>
+              )}
+            </div>
+            <div className="pp-hero__info">
+              <h1 className="pp-hero__name">{profile.full_name || profile.username}</h1>
+              <p className="pp-hero__username">@{profile.username}</p>
+              <div className="pp-hero__badges">
+                <span
+                  className="pp-badge"
+                  style={{ color: memberColor, background: `${memberColor}18`, border: `1px solid ${memberColor}44` }}
+                >
+                  {isPremium ? `✦ ${memberLabel}` : 'Free Account'}
+                </span>
+                {profile.is_verified && (
+                  <span className="pp-badge pp-badge--verified">✓ Verified</span>
+                )}
               </div>
+            </div>
+            <div className="pp-hero__actions">
+              <button className="pp-btn pp-btn--outline pp-btn--sm" onClick={handleRefresh} disabled={refreshing}>
+                {refreshing ? '⟳ Memuat...' : '⟳ Refresh'}
+              </button>
+              <button className="pp-btn pp-btn--danger pp-btn--sm" onClick={handleLogout}>
+                ⎋ Logout
+              </button>
             </div>
           </div>
 
-          {/* Tabs */}
-          <div className="profile-tabs">
-            <div className="tabs-list">
-              <button
-                onClick={() => setActiveTab('profile')}
-                className={`tab-button ${activeTab === 'profile' ? 'active' : ''}`}
-              >
-                <User style={{ width: '16px', height: '16px' }} />
-                Profile
-              </button>
-              <button
-                onClick={() => setActiveTab('activity')}
-                className={`tab-button ${activeTab === 'activity' ? 'active' : ''}`}
-              >
-                <Activity style={{ width: '16px', height: '16px' }} />
-                Activity
-              </button>
+          {/* Stats row */}
+          <div className="pp-hero__stats">
+            <div className="pp-hero__stat">
+              <span className="pp-hero__stat-num">{profile.referral_code || '—'}</span>
+              <span className="pp-hero__stat-label">Referral Code</span>
+            </div>
+            <div className="pp-hero__stat-divider" />
+            <div className="pp-hero__stat">
+              <span className="pp-hero__stat-num" style={{ color: isPremium ? memberColor : '#555' }}>
+                {isPremium ? `${membership.days_remaining} hari` : '—'}
+              </span>
+              <span className="pp-hero__stat-label">Sisa Membership</span>
+            </div>
+            <div className="pp-hero__stat-divider" />
+            <div className="pp-hero__stat">
+              <span className="pp-hero__stat-num" style={{ color: profile.is_verified ? '#2ECC71' : '#888' }}>
+                {profile.is_verified ? 'Verified' : 'Unverified'}
+              </span>
+              <span className="pp-hero__stat-label">Status Email</span>
             </div>
           </div>
         </div>
 
-        {/* Alerts */}
-        {error && (
-          <div className="alert alert-error">
-            <X style={{ width: '20px', height: '20px' }} />
-            <div className="alert-content">
-              <p className="alert-message">{error}</p>
-            </div>
-            <button onClick={() => setError('')} className="alert-close">
-              <X style={{ width: '16px', height: '16px' }} />
+        {/* ── TABS ──────────────────────────────────────────────────────── */}
+        <div className="pp-tabs">
+          {['profile', 'membership', 'orders', 'notifications'].map((tab) => (
+            <button
+              key={tab}
+              className={`pp-tab ${activeTab === tab ? 'pp-tab--active' : ''}`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab === 'profile' && '👤 Profil'}
+              {tab === 'membership' && '⭐ Membership'}
+              {tab === 'orders' && '🛒 Order'}
+              {tab === 'notifications' && (
+                <>🔔 Notifikasi {unreadCount > 0 && <span className="pp-tab-badge">{unreadCount}</span>}</>
+              )}
             </button>
-          </div>
-        )}
+          ))}
+        </div>
 
-        {success && (
-          <div className="alert alert-success">
-            <div style={{ width: '20px', height: '20px' }}>✓</div>
-            <div className="alert-content">
-              <p className="alert-message">{success}</p>
-            </div>
-            <button onClick={() => setSuccess('')} className="alert-close">
-              <X style={{ width: '16px', height: '16px' }} />
-            </button>
-          </div>
-        )}
-
-        {/* Tab Content */}
+        {/* ── TAB: PROFILE ──────────────────────────────────────────────── */}
         {activeTab === 'profile' && (
-          <div className="profile-content two-column">
-            {/* Main Profile Info */}
-            <div>
-              <div className="profile-card">
-                <h2>Personal Information</h2>
-                
-                <div className="profile-info-grid">
-                  <div className="profile-info-item">
-                    <User className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Username</p>
-                      <p>{profile.username}</p>
-                    </div>
+          <div className="pp-grid">
+            <div className="pp-col">
+              {/* Personal Info */}
+              <div className="pp-card">
+                <h2 className="pp-card__title">Informasi Pribadi</h2>
+                <div className="pp-info-list">
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">👤 Username</span>
+                    <span className="pp-info-value">{profile.username}</span>
                   </div>
-
-                  <div className="profile-info-item">
-                    <User className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Full Name</p>
-                      <p>{profile.full_name || '-'}</p>
-                    </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">📛 Nama Lengkap</span>
+                    <span className="pp-info-value">{profile.full_name || '—'}</span>
                   </div>
-
-                  <div className="profile-info-item">
-                    <Mail className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Email</p>
-                      <p>{profile.email || '-'}</p>
-                    </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">✉️ Email</span>
+                    <span className="pp-info-value">{profile.email || '—'}</span>
                   </div>
-
-                  <div className="profile-info-item">
-                    <Phone className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Phone Number</p>
-                      <p>{profile.nomor_hp || '-'}</p>
-                    </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">📱 No. HP</span>
+                    <span className="pp-info-value">{profile.phone || 'Belum diisi'}</span>
                   </div>
-
-                  {profile.occupation && (
-                    <div className="profile-info-item">
-                      <Building className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Occupation</p>
-                        <p>{profile.occupation}</p>
-                        {profile.company && (
-                          <p style={{ fontSize: '0.875rem', color: '#6b7280' }}>at {profile.company}</p>
-                        )}
-                      </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">🎁 Referral</span>
+                    <span className="pp-info-value pp-info-value--mono">{profile.referral_code || '—'}</span>
+                  </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">📅 Bergabung</span>
+                    <span className="pp-info-value">{formatDate(profile.created_at)}</span>
+                  </div>
+                  {profile.last_login && (
+                    <div className="pp-info-row">
+                      <span className="pp-info-label">🕐 Login Terakhir</span>
+                      <span className="pp-info-value">{formatRelative(profile.last_login)}</span>
                     </div>
                   )}
-
-                  {profile.website && (
-                    <div className="profile-info-item">
-                      <Globe className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Website</p>
-                        <a 
-                          href={profile.website} 
-                          target="_blank" 
-                          rel="noopener noreferrer"
-                          className="profile-info-link"
-                        >
-                          {profile.website}
-                        </a>
-                      </div>
-                    </div>
-                  )}
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">✅ Status Akun</span>
+                    <span className="pp-info-value" style={{ color: profile.is_active ? '#2ECC71' : '#DC1F2E' }}>
+                      {profile.is_active ? 'Aktif' : 'Nonaktif'}
+                    </span>
+                  </div>
                 </div>
+              </div>
+            </div>
 
-                {profile.bio && (
-                  <div className="profile-bio">
-                    <p>Bio</p>
-                    <p>{profile.bio}</p>
+            {/* Sidebar */}
+            <div className="pp-col pp-col--sidebar">
+              <div className="pp-card">
+                <h3 className="pp-card__subtitle">Status Membership</h3>
+                {isPremium ? (
+                  <>
+                    <div className="pp-membership-badge" style={{ background: `${memberColor}18`, borderColor: `${memberColor}44`, color: memberColor }}>
+                      ✦ {memberLabel} · Aktif
+                    </div>
+                    <div className="pp-info-list" style={{ marginTop: 12 }}>
+                      <div className="pp-info-row">
+                        <span className="pp-info-label">Mulai</span>
+                        <span className="pp-info-value">{formatDate(membership.membership_started_at)}</span>
+                      </div>
+                      <div className="pp-info-row">
+                        <span className="pp-info-label">Berakhir</span>
+                        <span className="pp-info-value">{formatDate(membership.membership_expired_at)}</span>
+                      </div>
+                      <div className="pp-info-row">
+                        <span className="pp-info-label">Sisa</span>
+                        <span className="pp-info-value" style={{ color: memberColor, fontWeight: 700 }}>
+                          {membership.days_remaining} hari
+                        </span>
+                      </div>
+                    </div>
+                  </>
+                ) : (
+                  <div className="pp-free-box">
+                    <p>Akun Free — upgrade untuk akses semua livestream</p>
+                    <button className="pp-btn pp-btn--primary" style={{ marginTop: 10, width: '100%' }}
+                      onClick={() => navigate('/membership')}>
+                      ⚡ Upgrade Sekarang
+                    </button>
                   </div>
                 )}
               </div>
 
-              {/* Address Section */}
-              <div className="profile-card">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem' }}>
-                  <h2>Address Information</h2>
-                  <button
-                    onClick={() => setEditingAddress(!editingAddress)}
-                    className="btn btn-outline"
-                    style={{ fontSize: '0.875rem', padding: '0.5rem 1rem' }}
-                  >
-                    <Edit style={{ width: '16px', height: '16px' }} />
-                    <span>{editingAddress ? 'Cancel' : 'Edit Address'}</span>
-                  </button>
-                </div>
+              <div className="pp-card">
+                <h3 className="pp-card__subtitle">User ID</h3>
+                <p className="pp-user-id">{profile.user_id}</p>
+              </div>
+            </div>
+          </div>
+        )}
 
-                {editingAddress ? (
-                  <form onSubmit={handleUpdateAddress} className="profile-form">
-                    <div className="form-group" style={{ position: 'relative' }}>
-                      <label className="form-label">
-                        Complete Address * 
-                        <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 'normal' }}>
-                          (Saved locally)
-                        </span>
-                      </label>
-                      <textarea
-                        name="alamat"
-                        value={addressData.alamat}
-                        onChange={handleAddressChange}
-                        placeholder="Type to search addresses..."
-                        className="form-input"
-                        rows="3"
-                        required
-                      />
-                      
-                      {/* Address Suggestions */}
-                      {showSuggestions && (
-                        <div style={{
-                          position: 'absolute',
-                          top: '100%',
-                          left: 0,
-                          right: 0,
-                          backgroundColor: 'white',
-                          border: '1px solid #d1d5db',
-                          borderRadius: '8px',
-                          boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
-                          zIndex: 10,
-                          maxHeight: '200px',
-                          overflowY: 'auto'
-                        }}>
-                          {searchingAddress && (
-                            <div style={{ padding: '0.75rem', fontSize: '0.875rem', color: '#6b7280' }}>
-                              Searching addresses...
-                            </div>
-                          )}
-                          {addressSuggestions.map((suggestion, index) => (
-                            <div
-                              key={index}
-                              onClick={() => selectAddressSuggestion(suggestion)}
-                              style={{
-                                padding: '0.75rem',
-                                borderBottom: index < addressSuggestions.length - 1 ? '1px solid #e5e7eb' : 'none',
-                                cursor: 'pointer',
-                                fontSize: '0.875rem'
-                              }}
-                              onMouseEnter={(e) => e.target.style.backgroundColor = '#f3f4f6'}
-                              onMouseLeave={(e) => e.target.style.backgroundColor = 'white'}
-                            >
-                              <div style={{ fontWeight: '500' }}>{suggestion.title}</div>
-                              {suggestion.address.label && (
-                                <div style={{ color: '#6b7280', fontSize: '0.8rem' }}>
-                                  {suggestion.address.label}
-                                </div>
-                              )}
-                            </div>
-                          ))}
-                        </div>
+        {/* ── TAB: MEMBERSHIP ───────────────────────────────────────────── */}
+        {activeTab === 'membership' && (
+          <div className="pp-card">
+            <h2 className="pp-card__title">Status Membership</h2>
+            {isPremium ? (
+              <>
+                <div className="pp-membership-hero" style={{ borderColor: `${memberColor}44`, background: `${memberColor}09` }}>
+                  <div className="pp-membership-hero__type" style={{ color: memberColor }}>✦ {memberLabel}</div>
+                  <div className="pp-membership-hero__days" style={{ color: memberColor }}>
+                    {membership.days_remaining}
+                    <span>hari tersisa</span>
+                  </div>
+                  <div className="pp-membership-progress-wrap">
+                    <div className="pp-membership-progress" style={{ backgroundColor: `${memberColor}22` }}>
+                      <div className="pp-membership-progress__fill"
+                        style={{ backgroundColor: memberColor, width: `${Math.min(100, (membership.days_remaining / 30) * 100)}%` }} />
+                    </div>
+                  </div>
+                </div>
+                <div className="pp-info-list" style={{ marginTop: 16 }}>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">📅 Mulai</span>
+                    <span className="pp-info-value">{formatDate(membership.membership_started_at)}</span>
+                  </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">📅 Berakhir</span>
+                    <span className="pp-info-value">{formatDate(membership.membership_expired_at)}</span>
+                  </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">🔖 Tipe</span>
+                    <span className="pp-info-value" style={{ color: memberColor, fontWeight: 700 }}>{memberLabel}</span>
+                  </div>
+                  <div className="pp-info-row">
+                    <span className="pp-info-label">✅ Status</span>
+                    <span className="pp-info-value" style={{ color: '#2ECC71' }}>Aktif</span>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="pp-free-box">
+                <div className="pp-free-box__icon">⭐</div>
+                <h3>Akun Free</h3>
+                <p>Upgrade ke Membership untuk akses semua livestream theater & event JKT48 tanpa batas.</p>
+                <button className="pp-btn pp-btn--primary pp-btn--lg" onClick={() => navigate('/membership')}>
+                  ⚡ Upgrade Membership
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ── TAB: ORDERS ───────────────────────────────────────────────── */}
+        {activeTab === 'orders' && (
+          <div className="pp-card">
+            <h2 className="pp-card__title">Riwayat Order</h2>
+            {orders.length === 0 ? (
+              <div className="pp-empty">
+                <span>🛒</span>
+                <p>Belum ada order</p>
+              </div>
+            ) : (
+              <div className="pp-order-list">
+                {orders.map((o) => (
+                  <div key={o.order_id} className="pp-order-item">
+                    <div className="pp-order-item__left">
+                      <p className="pp-order-item__plan">{o.plan_name}</p>
+                      <p className="pp-order-item__id">#{o.order_id.slice(-10)}</p>
+                      <p className="pp-order-item__date">{formatRelative(o.created_at)}</p>
+                      {o.membership_expired_at && (
+                        <p className="pp-order-item__exp">Exp: {formatDate(o.membership_expired_at)}</p>
                       )}
                     </div>
-
-                    <div className="form-row">
-                      <div className="form-group">
-                        <label className="form-label">City</label>
-                        <input
-                          type="text"
-                          name="city"
-                          value={addressData.city}
-                          onChange={handleAddressChange}
-                          placeholder="Enter city"
-                          className="form-input"
-                        />
-                      </div>
-
-                      <div className="form-group">
-                        <label className="form-label">Province</label>
-                        <input
-                          type="text"
-                          name="province"
-                          value={addressData.province}
-                          onChange={handleAddressChange}
-                          placeholder="Enter province"
-                          className="form-input"
-                        />
-                      </div>
-                    </div>
-
-                    <div className="form-row">
-                      <div className="form-group">
-                        <label className="form-label">
-                          Postal Code 
-                          <span style={{ fontSize: '0.75rem', color: '#6b7280', fontWeight: 'normal' }}>
-                            (Saved locally)
-                          </span>
-                        </label>
-                        <input
-                          type="text"
-                          name="postal_code"
-                          value={addressData.postal_code}
-                          onChange={handleAddressChange}
-                          placeholder="Enter postal code"
-                          className="form-input"
-                        />
-                      </div>
-
-                      <div className="form-group">
-                        <label className="form-label">Country</label>
-                        <select
-                          name="country"
-                          value={addressData.country}
-                          onChange={handleAddressChange}
-                          className="form-input form-select"
-                        >
-                          <option value="Indonesia">Indonesia</option>
-                          <option value="Malaysia">Malaysia</option>
-                          <option value="Singapore">Singapore</option>
-                          <option value="Thailand">Thailand</option>
-                          <option value="Philippines">Philippines</option>
-                          <option value="Other">Other</option>
-                        </select>
-                      </div>
-                    </div>
-
-                    <div style={{ marginTop: '1rem', padding: '0.75rem', backgroundColor: '#fffbeb', border: '1px solid #fbbf24', borderRadius: '8px', fontSize: '0.875rem' }}>
-                      <p style={{ margin: 0, color: '#92400e' }}>
-                        <strong>Note:</strong> Complete address and postal code will be saved locally on your device. 
-                        City, province, and country will be synced to the server if authenticated.
+                    <div className="pp-order-item__right">
+                      <p className="pp-order-item__amount">
+                        Rp{Number(o.final_amount).toLocaleString('id-ID')}
                       </p>
-                    </div>
-
-                    <div className="form-actions">
-                      <button
-                        type="submit"
-                        className="btn btn-primary"
-                        disabled={saving}
+                      <span
+                        className="pp-order-item__status"
+                        style={{ color: getOrderStatusColor(o.status), background: `${getOrderStatusColor(o.status)}18`, border: `1px solid ${getOrderStatusColor(o.status)}44` }}
                       >
-                        <Save style={{ width: '16px', height: '16px' }} />
-                        <span>{saving ? 'Updating...' : 'Update Address'}</span>
-                      </button>
-                    </div>
-                  </form>
-                ) : (
-                  <div className="profile-info-grid">
-                    <div className="profile-info-item full-width">
-                      <MapPin className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Complete Address</p>
-                        <p>{profile.alamat || 'No address provided'}</p>
-                        {profile.alamat && (
-                          <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                            (Stored locally)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="profile-info-item">
-                      <MapPin className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>City</p>
-                        <p>{profile.city || '-'}</p>
-                      </div>
-                    </div>
-
-                    <div className="profile-info-item">
-                      <MapPin className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Province</p>
-                        <p>{profile.province || '-'}</p>
-                      </div>
-                    </div>
-
-                    <div className="profile-info-item">
-                      <MapPin className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Postal Code</p>
-                        <p>{profile.postal_code || '-'}</p>
-                        {profile.postal_code && (
-                          <span style={{ fontSize: '0.75rem', color: '#6b7280' }}>
-                            (Stored locally)
-                          </span>
-                        )}
-                      </div>
-                    </div>
-
-                    <div className="profile-info-item">
-                      <Globe className="profile-info-icon" />
-                      <div className="profile-info-content">
-                        <p>Country</p>
-                        <p>{profile.country || 'Indonesia'}</p>
-                      </div>
+                        {o.status.toUpperCase()}
+                      </span>
+                      {o.paid_at && (
+                        <p className="pp-order-item__paid">Dibayar: {formatRelative(o.paid_at)}</p>
+                      )}
                     </div>
                   </div>
-                )}
+                ))}
               </div>
-            </div>
-
-            {/* Profile Stats */}
-            <div className="sidebar-cards">
-              <div className="profile-card">
-                <h3>Profile Information</h3>
-                <div className="status-list">
-                  <div className="profile-info-item">
-                    <Calendar className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Joined</p>
-                      <p>{formatDate(profile.created_at)}</p>
-                    </div>
-                  </div>
-                  <div className="profile-info-item">
-                    <Activity className="profile-info-icon" />
-                    <div className="profile-info-content">
-                      <p>Last Updated</p>
-                      <p>{formatDate(profile.updated_at)}</p>
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="profile-card">
-                <div style={{ padding: '1rem', background: '#f9fafb', borderRadius: '8px', fontSize: '0.875rem', color: '#6b7280' }}>
-                  <p style={{ marginBottom: '0.5rem', fontWeight: '600', color: '#374151' }}>
-                    {profile.profile_id?.startsWith('local_') ? 'Local Profile' : 'Your Profile'}
-                  </p>
-                  <p>
-                    {profile.profile_id?.startsWith('local_') 
-                      ? 'This profile is created from your local storage data. Register or login to save it permanently.' 
-                      : 'This is your personal profile. You can edit your address information.'
-                    }
-                  </p>
-                  <p style={{ marginTop: '0.5rem' }}>Profile ID: {profile.profile_id}</p>
-                </div>
-              </div>
-            </div>
+            )}
           </div>
         )}
 
-        {activeTab === 'activity' && (
-          <div className="profile-card">
-            <h2>Account Activity</h2>
-            
-            <div className="activity-stats">
-              <div className="activity-stat-card blue">
-                <div className="activity-stat-info">
-                  <p>Account Status</p>
-                  <p>{profile.is_active ? 'Active' : 'Inactive'}</p>
-                </div>
-                <Activity className="activity-stat-icon" />
-              </div>
-
-              <div className="activity-stat-card green">
-                <div className="activity-stat-info">
-                  <p>Member Since</p>
-                  <p style={{ fontSize: '1.125rem' }}>{formatDate(profile.created_at)}</p>
-                </div>
-                <Calendar className="activity-stat-icon" />
-              </div>
-
-              <div className="activity-stat-card purple">
-                <div className="activity-stat-info">
-                  <p>Last Updated</p>
-                  <p style={{ fontSize: '1.125rem' }}>{formatDate(profile.updated_at)}</p>
-                </div>
-                <Clock className="activity-stat-icon" />
-              </div>
+        {/* ── TAB: NOTIFICATIONS ────────────────────────────────────────── */}
+        {activeTab === 'notifications' && (
+          <div className="pp-card">
+            <div className="pp-card__header">
+              <h2 className="pp-card__title">Notifikasi</h2>
+              {unreadCount > 0 && (
+                <button className="pp-btn pp-btn--outline pp-btn--sm" onClick={markAllRead}>
+                  ✓ Tandai semua dibaca
+                </button>
+              )}
             </div>
-
-            <div className="activity-history">
-              <h3>Profile Timeline</h3>
-              <div className="activity-list">
-                <div className="activity-item">
-                  <div className="activity-icon-container green">
-                    <User className="activity-icon" />
-                  </div>
-                  <div className="activity-content">
-                    <p>Account created</p>
-                    <p>{formatDate(profile.created_at)}</p>
-                  </div>
-                </div>
-
-                {profile.updated_at !== profile.created_at && (
-                  <div className="activity-item">
-                    <div className="activity-icon-container blue">
-                      <Edit className="activity-icon" />
-                    </div>
-                    <div className="activity-content">
-                      <p>Profile updated</p>
-                      <p>{formatDate(profile.updated_at)}</p>
-                    </div>
-                  </div>
-                )}
-
-                {profile.is_verified && (
-                  <div className="activity-item">
-                    <div className="activity-icon-container purple">
-                      <Shield className="activity-icon" />
-                    </div>
-                    <div className="activity-content">
-                      <p>Account verified</p>
-                      <p>Profile has been verified</p>
-                    </div>
-                  </div>
-                )}
-
-                {profile.alamat && (
-                  <div className="activity-item">
-                    <div className="activity-icon-container blue">
-                      <MapPin className="activity-icon" />
-                    </div>
-                    <div className="activity-content">
-                      <p>Address information added</p>
-                      <p>Profile includes address details</p>
-                    </div>
-                  </div>
-                )}
+            {notifications.length === 0 ? (
+              <div className="pp-empty">
+                <span>🔔</span>
+                <p>Belum ada notifikasi</p>
               </div>
-            </div>
+            ) : (
+              <div className="pp-notif-list">
+                {notifications.map((n) => (
+                  <div key={n.id} className={`pp-notif-item ${!n.is_read ? 'pp-notif-item--unread' : ''}`}>
+                    <div className="pp-notif-item__dot" style={{ background: n.is_read ? '#1e1e1e' : '#DC1F2E' }} />
+                    <div className="pp-notif-item__body">
+                      <p className="pp-notif-item__title">{n.title}</p>
+                      <p className="pp-notif-item__msg">{n.message}</p>
+                      <p className="pp-notif-item__time">{formatRelative(n.created_at)}</p>
+                    </div>
+                    <span className="pp-notif-item__type">{n.category || n.type}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </div>
+
+      <style>{`
+        /* ── Reset & base ─────────────────────────────── */
+        .pp-wrapper {
+          min-height: 100vh;
+          background: #f4f5f7;
+          padding: 24px 16px 60px;
+          box-sizing: border-box;
+          font-family: inherit;
+        }
+        .pp-container {
+          max-width: 1100px;
+          margin: 0 auto;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+        }
+
+        /* ── Loading / Error ──────────────────────────── */
+        .pp-loading, .pp-error {
+          min-height: 100vh;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          justify-content: center;
+          gap: 16px;
+          background: #f4f5f7;
+          color: #333;
+          text-align: center;
+          padding: 24px;
+        }
+        .pp-spinner {
+          width: 48px; height: 48px;
+          border: 4px solid rgba(123,28,28,0.15);
+          border-top: 4px solid #7b1c1c;
+          border-radius: 50%;
+          animation: ppSpin 0.8s linear infinite;
+        }
+        @keyframes ppSpin { to { transform: rotate(360deg); } }
+        .pp-error__icon { font-size: 3rem; }
+
+        /* ── Toast ────────────────────────────────────── */
+        .pp-toast {
+          position: fixed;
+          top: 20px; right: 20px;
+          z-index: 9999;
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 14px 18px;
+          border-radius: 12px;
+          font-weight: 600;
+          font-size: 14px;
+          max-width: 400px;
+          box-shadow: 0 8px 24px rgba(0,0,0,0.15);
+          animation: ppSlideIn 0.4s cubic-bezier(0.68,-0.55,0.265,1.55);
+        }
+        @keyframes ppSlideIn { from { transform: translateX(120%); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+        .pp-toast--success { background: #d4edda; border: 1.5px solid #b1dfbb; color: #155724; }
+        .pp-toast--error   { background: #f8d7da; border: 1.5px solid #f1b0b7; color: #721c24; }
+
+        /* ── Hero ─────────────────────────────────────── */
+        .pp-hero {
+          background: white;
+          border-radius: 16px;
+          box-shadow: 0 2px 12px rgba(0,0,0,0.07);
+          overflow: hidden;
+        }
+        .pp-hero__top {
+          display: flex;
+          align-items: flex-start;
+          gap: 16px;
+          padding: 24px;
+          flex-wrap: wrap;
+        }
+        .pp-hero__avatar-wrap {
+          position: relative;
+          flex-shrink: 0;
+        }
+        .pp-hero__avatar-img {
+          width: 72px; height: 72px;
+          border-radius: 50%;
+          object-fit: cover;
+          border: 3px solid #7b1c1c;
+        }
+        .pp-hero__avatar-initials {
+          width: 72px; height: 72px;
+          border-radius: 50%;
+          background: linear-gradient(135deg, #7b1c1c, #6a1818);
+          color: white;
+          font-size: 1.6rem;
+          font-weight: 900;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+        }
+        .pp-hero__verified-dot {
+          position: absolute;
+          bottom: 2px; right: 2px;
+          width: 20px; height: 20px;
+          border-radius: 50%;
+          background: #2ECC71;
+          color: white;
+          font-size: 11px;
+          font-weight: 900;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 2px solid white;
+        }
+        .pp-hero__info { flex: 1; min-width: 0; }
+        .pp-hero__name { margin: 0 0 4px; font-size: 1.4rem; font-weight: 800; color: #111; }
+        .pp-hero__username { margin: 0 0 8px; color: #888; font-size: 0.9rem; }
+        .pp-hero__badges { display: flex; gap: 8px; flex-wrap: wrap; }
+        .pp-badge {
+          padding: 3px 10px;
+          border-radius: 20px;
+          font-size: 11px;
+          font-weight: 700;
+          letter-spacing: 0.5px;
+        }
+        .pp-badge--verified { background: #dcfce7; color: #166534; border: 1px solid #b1dfbb; }
+        .pp-hero__actions { display: flex; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+
+        .pp-hero__stats {
+          display: flex;
+          align-items: center;
+          background: #f8f9fa;
+          border-top: 1px solid #e9ecef;
+        }
+        .pp-hero__stat {
+          flex: 1;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          padding: 14px 8px;
+          gap: 4px;
+        }
+        .pp-hero__stat-num {
+          font-size: 14px;
+          font-weight: 800;
+          color: #111;
+          font-family: monospace;
+        }
+        .pp-hero__stat-label { font-size: 11px; color: #888; }
+        .pp-hero__stat-divider { width: 1px; height: 36px; background: #e5e7eb; }
+
+        /* ── Tabs ─────────────────────────────────────── */
+        .pp-tabs {
+          display: flex;
+          background: white;
+          border-radius: 12px;
+          box-shadow: 0 1px 4px rgba(0,0,0,0.06);
+          overflow: hidden;
+          overflow-x: auto;
+        }
+        .pp-tab {
+          flex: 1;
+          padding: 14px 10px;
+          border: none;
+          background: none;
+          font-size: 13px;
+          font-weight: 600;
+          color: #888;
+          cursor: pointer;
+          border-bottom: 2px solid transparent;
+          white-space: nowrap;
+          transition: all 0.2s;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+        }
+        .pp-tab:hover { color: #7b1c1c; background: #fef2f2; }
+        .pp-tab--active { color: #7b1c1c; border-bottom-color: #7b1c1c; background: #fef2f2; }
+        .pp-tab-badge {
+          background: #DC1F2E;
+          color: white;
+          border-radius: 10px;
+          padding: 1px 6px;
+          font-size: 10px;
+          font-weight: 900;
+          min-width: 18px;
+          text-align: center;
+        }
+
+        /* ── Grid ─────────────────────────────────────── */
+        .pp-grid {
+          display: grid;
+          grid-template-columns: 1fr;
+          gap: 16px;
+        }
+        @media (min-width: 768px) {
+          .pp-grid { grid-template-columns: 2fr 1fr; }
+        }
+        .pp-col { display: flex; flex-direction: column; gap: 16px; }
+        .pp-col--sidebar { display: flex; flex-direction: column; gap: 16px; }
+
+        /* ── Card ─────────────────────────────────────── */
+        .pp-card {
+          background: white;
+          border-radius: 14px;
+          box-shadow: 0 1px 6px rgba(0,0,0,0.07);
+          padding: 20px;
+        }
+        .pp-card__title {
+          font-size: 1rem;
+          font-weight: 700;
+          color: #111;
+          margin: 0 0 16px;
+          padding-bottom: 12px;
+          border-bottom: 1px solid #f0f0f0;
+        }
+        .pp-card__subtitle {
+          font-size: 0.9rem;
+          font-weight: 700;
+          color: #333;
+          margin: 0 0 12px;
+        }
+        .pp-card__header {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          margin-bottom: 16px;
+        }
+        .pp-card__header .pp-card__title { margin: 0; padding: 0; border: none; }
+
+        /* ── Info rows ────────────────────────────────── */
+        .pp-info-list { display: flex; flex-direction: column; }
+        .pp-info-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          padding: 10px 0;
+          border-bottom: 1px solid #f5f5f5;
+          gap: 12px;
+        }
+        .pp-info-row:last-child { border-bottom: none; }
+        .pp-info-label { font-size: 13px; color: #888; flex-shrink: 0; }
+        .pp-info-value { font-size: 13px; font-weight: 600; color: #111; text-align: right; word-break: break-all; }
+        .pp-info-value--mono { font-family: monospace; letter-spacing: 1px; }
+
+        /* ── Membership ───────────────────────────────── */
+        .pp-membership-badge {
+          padding: 10px 16px;
+          border-radius: 10px;
+          border: 1px solid;
+          font-weight: 800;
+          font-size: 14px;
+          text-align: center;
+          letter-spacing: 0.5px;
+        }
+        .pp-membership-hero {
+          border-radius: 12px;
+          border: 1px solid;
+          padding: 20px;
+          text-align: center;
+          margin-bottom: 4px;
+        }
+        .pp-membership-hero__type {
+          font-size: 13px;
+          font-weight: 800;
+          letter-spacing: 1px;
+          margin-bottom: 8px;
+        }
+        .pp-membership-hero__days {
+          font-size: 3rem;
+          font-weight: 900;
+          display: flex;
+          align-items: baseline;
+          justify-content: center;
+          gap: 8px;
+        }
+        .pp-membership-hero__days span { font-size: 1rem; font-weight: 600; }
+        .pp-membership-progress-wrap { margin-top: 14px; }
+        .pp-membership-progress {
+          height: 6px;
+          border-radius: 4px;
+          overflow: hidden;
+        }
+        .pp-membership-progress__fill {
+          height: 100%;
+          border-radius: 4px;
+          transition: width 0.5s ease;
+        }
+
+        /* ── Free box ─────────────────────────────────── */
+        .pp-free-box {
+          text-align: center;
+          padding: 16px 0;
+        }
+        .pp-free-box__icon { font-size: 2.5rem; margin-bottom: 8px; }
+        .pp-free-box h3 { margin: 0 0 8px; color: #333; }
+        .pp-free-box p { color: #888; font-size: 13px; line-height: 1.6; margin: 0 0 12px; }
+
+        /* ── Orders ───────────────────────────────────── */
+        .pp-order-list { display: flex; flex-direction: column; gap: 2px; }
+        .pp-order-item {
+          display: flex;
+          justify-content: space-between;
+          align-items: flex-start;
+          padding: 14px 0;
+          border-bottom: 1px solid #f5f5f5;
+          gap: 12px;
+        }
+        .pp-order-item:last-child { border-bottom: none; }
+        .pp-order-item__left { flex: 1; min-width: 0; }
+        .pp-order-item__plan { font-weight: 700; color: #111; font-size: 14px; margin: 0 0 3px; }
+        .pp-order-item__id  { font-size: 11px; color: #aaa; font-family: monospace; margin: 0 0 2px; }
+        .pp-order-item__date { font-size: 11px; color: #bbb; margin: 0; }
+        .pp-order-item__exp { font-size: 11px; color: #aaa; margin: 4px 0 0; }
+        .pp-order-item__right { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; flex-shrink: 0; }
+        .pp-order-item__amount { font-weight: 800; font-size: 14px; color: #111; margin: 0; }
+        .pp-order-item__status {
+          font-size: 10px; font-weight: 800;
+          padding: 2px 8px; border-radius: 6px;
+          letter-spacing: 0.5px;
+        }
+        .pp-order-item__paid { font-size: 10px; color: #aaa; margin: 0; }
+
+        /* ── Notifications ────────────────────────────── */
+        .pp-notif-list { display: flex; flex-direction: column; }
+        .pp-notif-item {
+          display: flex;
+          align-items: flex-start;
+          gap: 12px;
+          padding: 14px 0;
+          border-bottom: 1px solid #f5f5f5;
+        }
+        .pp-notif-item:last-child { border-bottom: none; }
+        .pp-notif-item--unread { background: #fff9f9; margin: 0 -20px; padding: 14px 20px; }
+        .pp-notif-item__dot {
+          width: 8px; height: 8px;
+          border-radius: 50%;
+          margin-top: 5px;
+          flex-shrink: 0;
+        }
+        .pp-notif-item__body { flex: 1; min-width: 0; }
+        .pp-notif-item__title { font-weight: 700; color: #111; font-size: 13px; margin: 0 0 4px; }
+        .pp-notif-item__msg { color: #666; font-size: 12px; margin: 0 0 4px; line-height: 1.5; }
+        .pp-notif-item__time { color: #bbb; font-size: 11px; margin: 0; }
+        .pp-notif-item__type {
+          font-size: 10px; color: #aaa;
+          background: #f5f5f5;
+          padding: 2px 8px;
+          border-radius: 6px;
+          flex-shrink: 0;
+          align-self: flex-start;
+          margin-top: 4px;
+        }
+
+        /* ── User ID ──────────────────────────────────── */
+        .pp-user-id {
+          font-family: monospace;
+          font-size: 12px;
+          color: #888;
+          word-break: break-all;
+          background: #f8f9fa;
+          padding: 8px 12px;
+          border-radius: 8px;
+          margin: 0;
+        }
+
+        /* ── Empty ────────────────────────────────────── */
+        .pp-empty {
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 8px;
+          padding: 32px;
+          color: #bbb;
+          font-size: 14px;
+        }
+        .pp-empty span { font-size: 2rem; }
+
+        /* ── Buttons ──────────────────────────────────── */
+        .pp-btn {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          gap: 6px;
+          padding: 10px 18px;
+          border-radius: 10px;
+          border: none;
+          font-size: 14px;
+          font-weight: 600;
+          cursor: pointer;
+          transition: all 0.2s;
+          font-family: inherit;
+          text-decoration: none;
+        }
+        .pp-btn:hover:not(:disabled) { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
+        .pp-btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+        .pp-btn--primary { background: linear-gradient(135deg, #7b1c1c, #6a1818); color: white; }
+        .pp-btn--primary:hover:not(:disabled) { background: linear-gradient(135deg, #6a1818, #5a1515); }
+        .pp-btn--outline { background: white; border: 2px solid #7b1c1c; color: #7b1c1c; }
+        .pp-btn--outline:hover:not(:disabled) { background: #7b1c1c; color: white; }
+        .pp-btn--danger { background: #fef2f2; border: 1.5px solid #fecaca; color: #dc2626; }
+        .pp-btn--danger:hover:not(:disabled) { background: #dc2626; color: white; }
+        .pp-btn--sm { font-size: 12px; padding: 7px 12px; border-radius: 8px; }
+        .pp-btn--lg { padding: 14px 24px; font-size: 15px; }
+
+        /* ── Responsive ───────────────────────────────── */
+        @media (max-width: 600px) {
+          .pp-wrapper { padding: 12px 10px 50px; }
+          .pp-hero__top { flex-direction: column; }
+          .pp-hero__actions { width: 100%; }
+          .pp-hero__actions .pp-btn { flex: 1; }
+          .pp-tabs { gap: 0; }
+          .pp-tab { padding: 12px 6px; font-size: 11px; }
+          .pp-membership-hero__days { font-size: 2.2rem; }
+        }
+      `}</style>
     </div>
   );
 };
