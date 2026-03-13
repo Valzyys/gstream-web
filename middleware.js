@@ -58,7 +58,7 @@ const SUSPICIOUS_PATHS = [
 // ── Helper: kirim blocked response ───────────────────────────────
 function blocked(reason) {
   return new Response(BLOCKED_MSG, {
-    status: 200, // tetap 200 supaya scraper tidak tau diblokir
+    status: 403,
     headers: {
       "Content-Type":           "text/plain; charset=utf-8",
       "X-Robots-Tag":           "noindex, nofollow, noarchive, nosnippet",
