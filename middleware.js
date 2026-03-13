@@ -2,13 +2,14 @@
 //  middleware.js  —  Taruh di ROOT project (sejajar package.json)
 //  Vercel Edge Middleware — intercept SEMUA request sebelum
 //  sampai ke index.html
-//  
-//  Cara kerja:
-//  Bot/scraper/curl/fetch → langsung dapat BLOCKED_MSG
-//  Browser asli          → lanjut ke index.html seperti biasa
+//
+//  ⚠️  Vite project → JANGAN pakai next/server
+//      Gunakan Web Standard API (Request / Response)
 // ================================================================
 
-import { NextResponse } from "next/server";
+export const config = {
+  matcher: "/((?!_vercel|_next/static|_next/image|favicon.ico).*)",
+};
 
 const BLOCKED_MSG = "lu ngapain kocak ini udah di secure sama JKT48Connect";
 
@@ -26,7 +27,7 @@ const BOT_UA = [
   "bingbot", "googlebot", "yandexbot", "baiduspider",
   "facebookexternalhit", "twitterbot", "slackbot",
   "discordbot", "telegrambot", "whatsapp",
-  "mechanize", "scrapy", "casperjs", "zombie",
+  "mechanize", "casperjs", "zombie",
   "nightmare", "electron/", "phantomas",
 ];
 
@@ -57,19 +58,19 @@ const SUSPICIOUS_PATHS = [
 // ── Helper: kirim blocked response ───────────────────────────────
 function blocked(reason) {
   return new Response(BLOCKED_MSG, {
-    status:  200,  // tetap 200 supaya scraper tidak tau diblokir
+    status: 200, // tetap 200 supaya scraper tidak tau diblokir
     headers: {
-      "Content-Type":             "text/plain; charset=utf-8",
-      "X-Robots-Tag":             "noindex, nofollow, noarchive, nosnippet",
-      "Cache-Control":            "no-store, no-cache",
-      "X-Content-Type-Options":   "nosniff",
-      "X-Frame-Options":          "DENY",
-      "X-Blocked-Reason":         reason,
+      "Content-Type":           "text/plain; charset=utf-8",
+      "X-Robots-Tag":           "noindex, nofollow, noarchive, nosnippet",
+      "Cache-Control":          "no-store, no-cache",
+      "X-Content-Type-Options": "nosniff",
+      "X-Frame-Options":        "DENY",
+      "X-Blocked-Reason":       reason,
     },
   });
 }
 
-// ── Helper: cek apakah Accept header seperti browser ─────────────
+// ── Helper: cek Accept header seperti browser ─────────────────────
 function hasBrowserAccept(accept) {
   if (!accept) return false;
   return accept.includes("text/html") || accept.includes("*/*");
@@ -77,8 +78,8 @@ function hasBrowserAccept(accept) {
 
 // ── Rate limiter (in-memory per edge instance) ────────────────────
 const rateLimitMap = new Map();
-const RATE_LIMIT   = 100;
-const RATE_WINDOW  = 60_000; // 1 menit
+const RATE_LIMIT  = 100;
+const RATE_WINDOW = 60_000; // 1 menit
 
 function isRateLimited(ip) {
   const now   = Date.now();
@@ -90,27 +91,31 @@ function isRateLimited(ip) {
 }
 
 // ================================================================
-//  MAIN MIDDLEWARE
+//  MAIN MIDDLEWARE  (Web Standard — tanpa next/server)
 // ================================================================
-export function middleware(request) {
-  const { pathname, search } = request.nextUrl ?? new URL(request.url);
-  const url      = pathname + search;
-  const ua       = (request.headers.get("user-agent") ?? "").toLowerCase();
-  const origin   = request.headers.get("origin")   ?? "";
-  const accept   = request.headers.get("accept")   ?? "";
-  const method   = request.method;
-  const ip       = request.headers.get("x-forwarded-for")?.split(",")[0].trim()
-                ?? request.headers.get("x-real-ip")
-                ?? "unknown";
+export default function middleware(request) {
+  const url      = new URL(request.url);
+  const pathname = url.pathname;
+  const search   = url.search;
+  const fullUrl  = pathname + search;
 
-  // ── 1. Tanpa User-Agent sama sekali → bot/curl ──────────────────
+  const ua     = (request.headers.get("user-agent") ?? "").toLowerCase();
+  const origin = request.headers.get("origin")   ?? "";
+  const accept = request.headers.get("accept")   ?? "";
+  const method = request.method;
+  const ip     =
+    request.headers.get("x-forwarded-for")?.split(",")[0].trim() ??
+    request.headers.get("x-real-ip") ??
+    "unknown";
+
+  // ── 1. Tanpa User-Agent → bot/curl ──────────────────────────────
   if (!ua.trim()) return blocked("no-ua");
 
   // ── 2. UA mengandung pola bot/scraper ───────────────────────────
   if (BOT_UA.some((p) => ua.includes(p))) return blocked("bot-ua");
 
-  // ── 3. Path mencurigakan (probe sensitif / injeksi) ─────────────
-  if (SUSPICIOUS_PATHS.some((p) => p.test(url))) return blocked("suspicious-path");
+  // ── 3. Path mencurigakan ─────────────────────────────────────────
+  if (SUSPICIOUS_PATHS.some((p) => p.test(fullUrl))) return blocked("suspicious-path");
 
   // ── 4. Rate limit ────────────────────────────────────────────────
   if (isRateLimited(ip)) {
@@ -128,8 +133,7 @@ export function middleware(request) {
     return blocked("unknown-origin");
   }
 
-  // ── 6. Request ke halaman HTML tapi tidak ada Accept: text/html ─
-  //    curl, wget, axios tanpa config tidak kirim Accept: text/html
+  // ── 6. GET ke halaman HTML tapi tanpa Accept: text/html ──────────
   const isAsset = /\.(js|css|png|jpg|jpeg|svg|ico|woff|woff2|ttf|eot|map|webp|avif|json|txt)$/.test(pathname);
   if (method === "GET" && !isAsset && !pathname.startsWith("/api/")) {
     if (!hasBrowserAccept(accept)) return blocked("no-html-accept");
@@ -137,29 +141,26 @@ export function middleware(request) {
 
   // ── 7. sec-fetch-site: cross-site dari origin asing ─────────────
   const secFetchSite = request.headers.get("sec-fetch-site") ?? "";
-  const secFetchMode = request.headers.get("sec-fetch-mode") ?? "";
   if (secFetchSite === "cross-site" && origin) {
-    const isAllowedOrigin = ALLOWED_ORIGINS.some(
-      (o) => origin === o || origin.startsWith(o)
-    );
-    if (!isAllowedOrigin) return blocked("cross-site-foreign");
+    const isAllowed = ALLOWED_ORIGINS.some((o) => origin === o || origin.startsWith(o));
+    if (!isAllowed) return blocked("cross-site-foreign");
   }
 
-  // ── 8. Tambah security headers ke semua response ─────────────────
-  const response = NextResponse.next();
-  response.headers.set("X-Content-Type-Options",  "nosniff");
-  response.headers.set("X-Frame-Options",          "DENY");
-  response.headers.set("X-XSS-Protection",         "1; mode=block");
-  response.headers.set("Referrer-Policy",          "strict-origin-when-cross-origin");
-  response.headers.set("X-Robots-Tag",             "index, follow");
+  // ── 8. Tambah security headers ke response ───────────────────────
+  const response = new Response(null, { status: 200 });
+  // Lanjutkan request ke Vercel dengan header tambahan
+  // (gunakan fetch passthrough untuk Vite/non-Next project)
+  return fetch(request).then((res) => {
+    const newHeaders = new Headers(res.headers);
+    newHeaders.set("X-Content-Type-Options", "nosniff");
+    newHeaders.set("X-Frame-Options",        "DENY");
+    newHeaders.set("X-XSS-Protection",       "1; mode=block");
+    newHeaders.set("Referrer-Policy",        "strict-origin-when-cross-origin");
+    newHeaders.set("X-Robots-Tag",           "index, follow");
 
-  return response;
+    return new Response(res.body, {
+      status:  res.status,
+      headers: newHeaders,
+    });
+  });
 }
-
-// ── Matcher: jalankan middleware di SEMUA route ───────────────────
-export const config = {
-  matcher: [
-    // Semua route kecuali _next internal Vercel
-    "/((?!_next/static|_next/image|favicon.ico).*)",
-  ],
-};
