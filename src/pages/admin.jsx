@@ -276,6 +276,7 @@ export default function AdminLive() {
   const [streamData,    setStreamData]    = useState(null);
   const [streamLoading, setStreamLoading] = useState(false);
   const [streamError,   setStreamError]   = useState("");
+  const [activeStream,  setActiveStream]  = useState(null); // currently playing stream entry
 
   // ── Restore session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -317,36 +318,32 @@ export default function AdminLive() {
       setStreamLoading(true);
       setStreamError("");
       setStreamData(null);
+      setActiveStream(null);
       try {
-        const url  = `${API_BASE}/live/show?slug=${encodeURIComponent(selectedSlug)}&apikey=${API_KEY}`;
-        const res  = await fetch(url);
-        const raw  = await res.json();
+        const url     = `${API_BASE}/live/show?slug=${encodeURIComponent(selectedSlug)}&apikey=${API_KEY}`;
+        const res     = await fetch(url);
+        const raw     = await res.json();
 
         // ── Decode charmap / M3U8 / flat JSON ──────────────────────────────
         const resolved = resolveStreamResponse(raw);
 
         if (!resolved.streams.length) {
-          setStreamData({ url: null, streams: [], session: {}, raw: resolved.raw });
+          setStreamData({ streams: [], session: {}, raw: resolved.raw });
           return;
         }
 
-        // Pick best quality: 1080p60 > 1080p > 720p60 > 720p > first available
-        const PREF = ["1080p60", "1080p", "720p60", "720p", "chunked"];
-        let picked = null;
-        for (const name of PREF) {
-          picked = resolved.streams.find(
-            (s) => s.NAME === name || s["GROUP-ID"] === name
-          );
-          if (picked) break;
-        }
-        const bestUrl = (picked || resolved.streams[0])?.url || null;
+        // Default: pick highest quality by BANDWIDTH (largest number = best)
+        const sorted = [...resolved.streams].sort(
+          (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+        );
+        const defaultStream = sorted[0];
 
         setStreamData({
-          url:     bestUrl,
-          streams: resolved.streams,
+          streams: resolved.streams, // keep original order for display
           session: resolved.session,
           raw:     resolved.raw,
         });
+        setActiveStream(defaultStream); // set active stream separately
       } catch (e) {
         setStreamError(e.message);
       } finally {
@@ -582,9 +579,10 @@ export default function AdminLive() {
                     </div>
                   )}
                   {!streamLoading && !streamError && streamData && (
-                    streamData.url ? (
+                    activeStream?.url ? (
                       <HLSPlayer
-                        src={streamData.url}
+                        key={activeStream.url}
+                        src={activeStream.url}
                         title={selectedShow?.title || selectedSlug}
                       />
                     ) : (
@@ -599,18 +597,26 @@ export default function AdminLive() {
                   )}
                 </div>
 
-                {/* Quality chips */}
-                {streamData?.streams?.length > 1 && (
+                {/* Quality selector — click to switch stream source */}
+                {streamData?.streams?.length > 0 && (
                   <div className="al-quality-row">
-                    <span className="al-quality-label">Kualitas tersedia:</span>
-                    {streamData.streams.map((s) => (
-                      <span key={s["GROUP-ID"] || s.NAME} className="al-quality-chip">
-                        {s.NAME}
-                        {s.BANDWIDTH && s.BANDWIDTH !== "0" && (
-                          <em> {Math.round(Number(s.BANDWIDTH) / 1000)}k</em>
-                        )}
-                      </span>
-                    ))}
+                    <span className="al-quality-label">Kualitas:</span>
+                    {[...streamData.streams]
+                      .sort((a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0))
+                      .map((s) => {
+                        const isActive = activeStream?.url === s.url;
+                        return (
+                          <button
+                            key={s["GROUP-ID"] || s.NAME}
+                            className={`al-quality-chip ${isActive ? "active" : ""}`}
+                            onClick={() => setActiveStream(s)}
+                            title={`${s.RESOLUTION || ""} · ${Math.round(Number(s.BANDWIDTH || 0) / 1000)}kbps`}
+                          >
+                            {s.NAME}
+                            {s.RESOLUTION && <em> {s.RESOLUTION}</em>}
+                          </button>
+                        );
+                      })}
                   </div>
                 )}
 
@@ -847,8 +853,11 @@ const globalStyles = `
   /* Quality */
   .al-quality-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .al-quality-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
-  .al-quality-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 11px; padding: 3px 10px; border-radius: 20px; font-family: var(--mono); }
-  .al-quality-chip em { color: var(--txt3); font-style: normal; }
+  .al-quality-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 11px; padding: 3px 10px; border-radius: 20px; font-family: var(--mono); cursor: pointer; transition: border-color .15s, background .15s; }
+  .al-quality-chip:hover { border-color: var(--txt3); color: var(--txt); }
+  .al-quality-chip.active { background: var(--red-dim); border-color: var(--red-mid); color: var(--txt); }
+  .al-quality-chip em { color: var(--txt3); font-style: normal; margin-left: 4px; }
+  .al-quality-chip.active em { color: var(--red); }
 
   /* Session info */
   .al-session-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
