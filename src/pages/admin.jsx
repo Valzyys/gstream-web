@@ -9,6 +9,123 @@ const API_KEY    = "JKTCONNECT";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
+/**
+ * Converts a character-map JSON object {"0":"#","1":"E",...} into a plain string.
+ * Mirrors the Node.js charmap_to_string helper used on the backend.
+ */
+function charmapToString(obj) {
+  return Object.keys(obj)
+    .filter((k) => !isNaN(k))
+    .sort((a, b) => Number(a) - Number(b))
+    .map((k) => obj[k])
+    .join("");
+}
+
+/** Returns true when every own key of obj is a numeric string */
+function isCharmap(obj) {
+  if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
+  const keys = Object.keys(obj);
+  return keys.length > 0 && keys.every((k) => !isNaN(k));
+}
+
+/**
+ * Parse an M3U8 master-playlist string into { session, streams }.
+ * Produces the same structure as the structured JSON output (doc 4 / doc 7).
+ */
+function parseM3U8(m3u8) {
+  const lines  = m3u8.split("\n").map((l) => l.trim()).filter(Boolean);
+  const session = {};
+  const streams = [];
+  let current  = null;
+
+  for (const line of lines) {
+    if (line.startsWith("#EXT-X-SESSION-DATA:")) {
+      const id  = (line.match(/DATA-ID="([^"]+)"/)  || [])[1];
+      const val = (line.match(/VALUE="([^"]+)"/)    || [])[1];
+      if (id && val !== undefined) session[id] = val;
+      continue;
+    }
+    if (line.startsWith("#EXT-X-MEDIA:")) {
+      current = {};
+      const get = (re) => (line.match(re) || [])[1];
+      current.TYPE        = get(/TYPE=([^,\n]+)/);
+      current["GROUP-ID"] = get(/GROUP-ID="([^"]+)"/);
+      current.NAME        = get(/NAME="([^"]+)"/);
+      current.AUTOSELECT  = get(/AUTOSELECT=([^,\n]+)/);
+      current.DEFAULT     = get(/DEFAULT=([^,\n]+)/);
+      continue;
+    }
+    if (line.startsWith("#EXT-X-STREAM-INF:")) {
+      if (!current) current = {};
+      const get = (re) => (line.match(re) || [])[1];
+      current.BANDWIDTH      = get(/BANDWIDTH=(\d+)/);
+      current.RESOLUTION     = get(/RESOLUTION=([^\s,]+)/);
+      current.CODECS         = get(/CODECS="([^"]+)"/);
+      current.VIDEO          = get(/VIDEO="([^"]+)"/);
+      current["FRAME-RATE"]  = get(/FRAME-RATE=([\d.]+)/);
+      continue;
+    }
+    // URL line that follows #EXT-X-STREAM-INF
+    if (!line.startsWith("#") && current && current.BANDWIDTH) {
+      current.url = line;
+      streams.push(current);
+      current = null;
+    }
+  }
+  return { session, streams };
+}
+
+/**
+ * Resolve a raw API response from /live/show into { session, streams, raw }.
+ * Handles three cases:
+ *   1. Already-structured JSON  → { session, streams }
+ *   2. Charmap JSON             → decode → parse M3U8 or inner JSON
+ *   3. Normal flat JSON         → extract stream_url / playback_url
+ */
+function resolveStreamResponse(data) {
+  // ── Case 1: already structured ────────────────────────────────────────────
+  if (data && Array.isArray(data.streams) && data.streams.length) {
+    return { session: data.session || {}, streams: data.streams, raw: data };
+  }
+
+  // ── Case 2: charmap ────────────────────────────────────────────────────────
+  if (isCharmap(data)) {
+    const str = charmapToString(data).trim();
+
+    if (str.startsWith("#EXTM3U")) {
+      const parsed = parseM3U8(str);
+      return { ...parsed, raw: { success: true, ...parsed } };
+    }
+
+    // Maybe the charmap encodes a JSON string
+    try {
+      const inner = JSON.parse(str);
+      return resolveStreamResponse(inner); // recurse once
+    } catch {
+      return { session: {}, streams: [], raw: { raw_string: str } };
+    }
+  }
+
+  // ── Case 3: flat JSON with a stream URL ────────────────────────────────────
+  const flatUrl =
+    data?.stream_url         ||
+    data?.data?.stream_url   ||
+    data?.playback_url       ||
+    data?.data?.playback_url ||
+    data?.url                ||
+    null;
+
+  if (flatUrl) {
+    return {
+      session: {},
+      streams: [{ NAME: "default", BANDWIDTH: "0", url: flatUrl }],
+      raw: data,
+    };
+  }
+
+  return { session: {}, streams: [], raw: data };
+}
+
 /** Normalise a timestamp (seconds or ms) to a JS Date */
 function tsToDate(ts) {
   if (!ts) return null;
@@ -19,25 +136,19 @@ function tsToDate(ts) {
 /** Return today's date string in WIB (UTC+7) as "YYYY-MM-DD" */
 function todayWIB() {
   const now = new Date(Date.now() + 7 * 3600 * 1000);
-  return now.toISOString().slice(0, 10); // "YYYY-MM-DD"
+  return now.toISOString().slice(0, 10);
 }
 
-/** Check whether a slug's embedded date matches today WIB.
- *  Slug format examples:
- *    love-dream-passion-2026-03-13-260304222432
- *    andai-ku-bukan-idola-2026-03-16-260304223236
- *  We pull the YYYY-MM-DD segment that appears right before the trailing id.
- */
+/** Check whether a slug's embedded date matches today WIB. */
 function slugMatchesToday(slug) {
   if (!slug) return false;
   const today = todayWIB();
-  // Match a date pattern YYYY-MM-DD anywhere in the slug
   const match = slug.match(/(\d{4}-\d{2}-\d{2})/g);
   if (!match) return false;
   return match.some((d) => d === today);
 }
 
-/** Also fallback: compare scheduled_at / live_at date against today WIB */
+/** Fallback: compare scheduled_at / live_at date against today WIB */
 function itemMatchesToday(item) {
   if (slugMatchesToday(item.slug)) return true;
   const candidates = [item.scheduled_at, item.live_at, item.end_at].filter(Boolean);
@@ -54,7 +165,7 @@ function itemMatchesToday(item) {
 function HLSPlayer({ src, title }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
-  const [status, setStatus] = useState("loading"); // loading | playing | error
+  const [status, setStatus] = useState("loading");
 
   useEffect(() => {
     if (!src || !videoRef.current) return;
@@ -181,11 +292,9 @@ export default function AdminLive() {
       const json = await res.json();
       const list = json.data || [];
 
-      // Filter to today WIB, fallback to all if none match
       const todayItems = list.filter(itemMatchesToday);
       setShows(todayItems.length ? todayItems : list);
 
-      // Auto-select first today match
       if (todayItems.length) {
         setSelectedSlug(todayItems[0].slug);
         setSelectedShow(todayItems[0]);
@@ -209,38 +318,35 @@ export default function AdminLive() {
       setStreamError("");
       setStreamData(null);
       try {
-        const url = `${API_BASE}/live/show?slug=${encodeURIComponent(selectedSlug)}&apikey=${API_KEY}`;
+        const url  = `${API_BASE}/live/show?slug=${encodeURIComponent(selectedSlug)}&apikey=${API_KEY}`;
         const res  = await fetch(url);
-        const json = await res.json();
+        const raw  = await res.json();
 
-        if (!json.success) throw new Error(json.message || "API error");
+        // ── Decode charmap / M3U8 / flat JSON ──────────────────────────────
+        const resolved = resolveStreamResponse(raw);
 
-        // Pick the best stream URL from parsed M3U8 or flat fields
-        let streamUrl = null;
-
-        if (json.streams && json.streams.length) {
-          // Find 1080p first, then 720p, then first available
-          const pref = ["1080p60", "1080p", "720p60", "720p"];
-          let picked = null;
-          for (const name of pref) {
-            picked = json.streams.find(
-              (s) => s.NAME === name || s["GROUP-ID"] === name
-            );
-            if (picked) break;
-          }
-          streamUrl = (picked || json.streams[0])?.url || null;
+        if (!resolved.streams.length) {
+          setStreamData({ url: null, streams: [], session: {}, raw: resolved.raw });
+          return;
         }
 
-        if (!streamUrl) {
-          streamUrl =
-            json.stream_url ||
-            json.data?.stream_url ||
-            json.data?.playback_url ||
-            json.playback_url ||
-            null;
+        // Pick best quality: 1080p60 > 1080p > 720p60 > 720p > first available
+        const PREF = ["1080p60", "1080p", "720p60", "720p", "chunked"];
+        let picked = null;
+        for (const name of PREF) {
+          picked = resolved.streams.find(
+            (s) => s.NAME === name || s["GROUP-ID"] === name
+          );
+          if (picked) break;
         }
+        const bestUrl = (picked || resolved.streams[0])?.url || null;
 
-        setStreamData({ url: streamUrl, raw: json });
+        setStreamData({
+          url:     bestUrl,
+          streams: resolved.streams,
+          session: resolved.session,
+          raw:     resolved.raw,
+        });
       } catch (e) {
         setStreamError(e.message);
       } finally {
@@ -256,10 +362,7 @@ export default function AdminLive() {
     setLoginError("");
     setLoginLoading(true);
     setTimeout(() => {
-      if (
-        loginForm.username === ADMIN_USER &&
-        loginForm.password === ADMIN_PASS
-      ) {
+      if (loginForm.username === ADMIN_USER && loginForm.password === ADMIN_PASS) {
         sessionStorage.setItem("adminlive_auth", "1");
         setAuthed(true);
       } else {
@@ -383,9 +486,9 @@ export default function AdminLive() {
 
             <div className="al-show-list">
               {shows.map((item) => {
-                const isActive = item.slug === selectedSlug;
+                const isActive  = item.slug === selectedSlug;
                 const schedDate = tsToDate(item.scheduled_at || item.live_at);
-                const timeStr = schedDate
+                const timeStr   = schedDate
                   ? new Date(schedDate.getTime() + 7 * 3600 * 1000)
                       .toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
                   : "—";
@@ -394,10 +497,7 @@ export default function AdminLive() {
                   <button
                     key={item.slug}
                     className={`al-show-card ${isActive ? "active" : ""}`}
-                    onClick={() => {
-                      setSelectedSlug(item.slug);
-                      setSelectedShow(item);
-                    }}
+                    onClick={() => { setSelectedSlug(item.slug); setSelectedShow(item); }}
                   >
                     <img
                       src={item.image_url || item.creator?.image_url}
@@ -409,7 +509,11 @@ export default function AdminLive() {
                       <span className="al-show-title">{item.title}</span>
                       <span className="al-show-meta">
                         <span className={`al-dot ${item.status}`} />
-                        {item.status === "live" ? "LIVE" : item.status === "scheduled" ? `⏰ ${timeStr}` : item.status}
+                        {item.status === "live"
+                          ? "LIVE"
+                          : item.status === "scheduled"
+                          ? `⏰ ${timeStr}`
+                          : item.status}
                       </span>
                       <span className="al-show-slug">{item.slug}</span>
                     </div>
@@ -495,15 +599,31 @@ export default function AdminLive() {
                   )}
                 </div>
 
-                {/* Quality / stream info */}
-                {streamData?.raw?.streams?.length > 0 && (
+                {/* Quality chips */}
+                {streamData?.streams?.length > 1 && (
                   <div className="al-quality-row">
                     <span className="al-quality-label">Kualitas tersedia:</span>
-                    {streamData.raw.streams.map((s) => (
-                      <span key={s["GROUP-ID"]} className="al-quality-chip">
-                        {s.NAME} <em>{Math.round(+s.BANDWIDTH / 1000)}k</em>
+                    {streamData.streams.map((s) => (
+                      <span key={s["GROUP-ID"] || s.NAME} className="al-quality-chip">
+                        {s.NAME}
+                        {s.BANDWIDTH && s.BANDWIDTH !== "0" && (
+                          <em> {Math.round(Number(s.BANDWIDTH) / 1000)}k</em>
+                        )}
                       </span>
                     ))}
+                  </div>
+                )}
+
+                {/* Session info (broadcast id, stream time, etc.) */}
+                {streamData?.session && Object.keys(streamData.session).length > 0 && (
+                  <div className="al-session-row">
+                    {["BROADCAST-ID", "VIDEO-SESSION-ID", "STREAM-TIME", "CLUSTER", "USER-COUNTRY"].map((key) =>
+                      streamData.session[key] ? (
+                        <span key={key} className="al-session-chip">
+                          <em>{key}:</em> {streamData.session[key]}
+                        </span>
+                      ) : null
+                    )}
                   </div>
                 )}
 
@@ -567,7 +687,6 @@ const globalStyles = `
     100% { background-position:  400px 0; }
   }
 
-  /* ── Noise overlay ── */
   .al-noise {
     pointer-events: none;
     position: fixed; inset: 0; z-index: 0;
@@ -576,9 +695,7 @@ const globalStyles = `
     opacity: .5;
   }
 
-  /* ═══════════════════════════════════════════════
-     LOGIN
-  ═══════════════════════════════════════════════ */
+  /* ── LOGIN ── */
   .al-login-bg {
     min-height: 100vh;
     background: var(--bg);
@@ -592,7 +709,6 @@ const globalStyles = `
     background: radial-gradient(ellipse 60% 50% at 50% 50%, #DC1F2E0a 0%, transparent 70%);
     pointer-events: none;
   }
-
   .al-login-card {
     position: relative; z-index: 1;
     width: min(420px, 92vw);
@@ -603,338 +719,156 @@ const globalStyles = `
     animation: fadeIn .5s ease;
     box-shadow: 0 32px 80px #00000088, 0 0 0 1px #ffffff06 inset;
   }
-
-  .al-logo {
-    display: flex; align-items: center; gap: 10px;
-    margin-bottom: 4px;
-  }
-  .al-logo-icon {
-    font-size: 28px; color: var(--red);
-    filter: drop-shadow(0 0 8px var(--red));
-  }
+  .al-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .al-logo-icon { font-size: 28px; color: var(--red); filter: drop-shadow(0 0 8px var(--red)); }
   .al-logo-icon.sm { font-size: 18px; }
-  .al-logo-text {
-    font-family: var(--display);
-    font-size: 22px; font-weight: 800;
-    color: var(--txt); letter-spacing: 3px;
-  }
+  .al-logo-text { font-family: var(--display); font-size: 22px; font-weight: 800; color: var(--txt); letter-spacing: 3px; }
   .al-logo-text em { color: var(--red); font-style: normal; }
-
-  .al-login-sub {
-    color: var(--txt3); font-size: 12px;
-    letter-spacing: 1px; margin-bottom: 32px;
-  }
-
+  .al-login-sub { color: var(--txt3); font-size: 12px; letter-spacing: 1px; margin-bottom: 32px; }
   .al-form { display: flex; flex-direction: column; gap: 16px; }
-
   .al-field { display: flex; flex-direction: column; gap: 6px; }
-  .al-field label {
-    font-size: 11px; font-weight: 600;
-    color: var(--txt2); letter-spacing: 1.5px; text-transform: uppercase;
-  }
+  .al-field label { font-size: 11px; font-weight: 600; color: var(--txt2); letter-spacing: 1.5px; text-transform: uppercase; }
   .al-field input {
-    background: var(--bg3);
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    padding: 11px 14px;
-    color: var(--txt); font-size: 14px;
-    font-family: var(--sans);
+    background: var(--bg3); border: 1px solid var(--line); border-radius: 8px;
+    padding: 11px 14px; color: var(--txt); font-size: 14px; font-family: var(--sans);
     outline: none; transition: border-color .2s, box-shadow .2s;
   }
-  .al-field input:focus {
-    border-color: var(--red-mid);
-    box-shadow: 0 0 0 3px var(--red-dim);
-  }
+  .al-field input:focus { border-color: var(--red-mid); box-shadow: 0 0 0 3px var(--red-dim); }
+  .al-error { background: #DC1F2E18; border: 1px solid #DC1F2E44; color: #ff6b6b; font-size: 13px; border-radius: 8px; padding: 10px 14px; }
 
-  .al-error {
-    background: #DC1F2E18; border: 1px solid #DC1F2E44;
-    color: #ff6b6b; font-size: 13px;
-    border-radius: 8px; padding: 10px 14px;
-  }
-
+  /* ── BUTTONS ── */
   .al-btn-primary {
     display: flex; align-items: center; justify-content: center; gap: 8px;
-    background: var(--red);
-    color: #fff; border: none; border-radius: 8px;
-    padding: 12px 20px; font-size: 13px; font-weight: 700;
-    letter-spacing: 2px; cursor: pointer;
-    font-family: var(--display);
+    background: var(--red); color: #fff; border: none; border-radius: 8px;
+    padding: 12px 20px; font-size: 13px; font-weight: 700; letter-spacing: 2px;
+    cursor: pointer; font-family: var(--display);
     transition: opacity .2s, transform .1s;
   }
   .al-btn-primary:hover { opacity: .88; }
   .al-btn-primary:active { transform: scale(.98); }
   .al-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
   .al-btn-primary.sm { padding: 8px 14px; font-size: 12px; }
-
   .al-btn-ghost {
-    background: transparent; border: 1px solid var(--line);
-    color: var(--txt2); border-radius: 8px;
-    padding: 8px 14px; font-size: 13px; cursor: pointer;
-    transition: border-color .2s, color .2s;
-    font-family: var(--sans);
+    background: transparent; border: 1px solid var(--line); color: var(--txt2);
+    border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+    transition: border-color .2s, color .2s; font-family: var(--sans);
   }
   .al-btn-ghost:hover { border-color: var(--txt3); color: var(--txt); }
   .al-btn-ghost.sm { padding: 5px 10px; font-size: 12px; }
-
   .al-btn-danger {
-    background: transparent; border: 1px solid #DC1F2E44;
-    color: var(--red); border-radius: 8px;
-    padding: 8px 14px; font-size: 13px; cursor: pointer;
-    transition: background .2s;
-    font-family: var(--sans);
+    background: transparent; border: 1px solid #DC1F2E44; color: var(--red);
+    border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
+    transition: background .2s; font-family: var(--sans);
   }
   .al-btn-danger:hover { background: var(--red-dim); }
 
-  /* Spinners */
+  /* ── SPINNERS ── */
   .al-spin {
-    display: inline-block;
-    width: 18px; height: 18px;
-    border: 2px solid #ffffff33;
-    border-top-color: #fff;
-    border-radius: 50%;
-    animation: spin .7s linear infinite;
+    display: inline-block; width: 18px; height: 18px;
+    border: 2px solid #ffffff33; border-top-color: #fff;
+    border-radius: 50%; animation: spin .7s linear infinite;
   }
   .al-spin.sm  { width: 13px; height: 13px; }
   .al-spin.xl  { width: 40px; height: 40px; border-width: 3px; border-top-color: var(--red); border-color: var(--red-dim); }
 
-  /* ═══════════════════════════════════════════════
-     DASHBOARD
-  ═══════════════════════════════════════════════ */
+  /* ── DASHBOARD ── */
   .al-dashboard {
-    min-height: 100vh;
-    background: var(--bg);
-    font-family: var(--sans);
-    color: var(--txt);
-    position: relative;
-    display: flex; flex-direction: column;
+    min-height: 100vh; background: var(--bg);
+    font-family: var(--sans); color: var(--txt);
+    position: relative; display: flex; flex-direction: column;
   }
-
-  /* Header */
   .al-header {
     position: sticky; top: 0; z-index: 100;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 24px;
-    height: 56px;
-    background: var(--bg2);
-    border-bottom: 1px solid var(--line);
+    padding: 0 24px; height: 56px;
+    background: var(--bg2); border-bottom: 1px solid var(--line);
     backdrop-filter: blur(12px);
   }
   .al-header-left { display: flex; align-items: center; gap: 10px; }
-  .al-header-title {
-    font-family: var(--display);
-    font-size: 15px; font-weight: 800;
-    letter-spacing: 3px; color: var(--txt);
-  }
-  .al-badge {
-    background: var(--red); color: #fff;
-    font-size: 9px; font-weight: 700; letter-spacing: 1.5px;
-    padding: 2px 7px; border-radius: 4px;
-  }
+  .al-header-title { font-family: var(--display); font-size: 15px; font-weight: 800; letter-spacing: 3px; color: var(--txt); }
+  .al-badge { background: var(--red); color: #fff; font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 2px 7px; border-radius: 4px; }
   .al-header-right { display: flex; align-items: center; gap: 10px; }
   .al-today { color: var(--txt2); font-size: 12px; font-family: var(--mono); }
 
-  /* Content layout */
-  .al-content {
-    flex: 1; display: flex;
-    position: relative; z-index: 1;
-  }
+  .al-content { flex: 1; display: flex; position: relative; z-index: 1; }
 
-  /* Sidebar */
+  /* ── SIDEBAR ── */
   .al-sidebar {
     width: 320px; min-width: 280px;
-    background: var(--bg2);
-    border-right: 1px solid var(--line);
+    background: var(--bg2); border-right: 1px solid var(--line);
     display: flex; flex-direction: column;
-    padding: 20px 16px;
-    overflow-y: auto;
+    padding: 20px 16px; overflow-y: auto;
     max-height: calc(100vh - 56px);
-    position: sticky; top: 56px;
-    gap: 12px;
+    position: sticky; top: 56px; gap: 12px;
   }
-  .al-sidebar-head {
-    display: flex; align-items: center;
-    justify-content: space-between;
-  }
-  .al-sidebar-head h2 {
-    font-family: var(--display);
-    font-size: 14px; font-weight: 800;
-    letter-spacing: 2px; color: var(--txt2);
-    text-transform: uppercase;
-  }
-
+  .al-sidebar-head { display: flex; align-items: center; justify-content: space-between; }
+  .al-sidebar-head h2 { font-family: var(--display); font-size: 14px; font-weight: 800; letter-spacing: 2px; color: var(--txt2); text-transform: uppercase; }
   .al-show-list { display: flex; flex-direction: column; gap: 8px; }
-
   .al-show-card {
     display: flex; align-items: flex-start; gap: 10px;
-    background: var(--bg3);
-    border: 1px solid var(--line);
-    border-radius: 10px;
-    padding: 10px;
-    cursor: pointer; text-align: left;
+    background: var(--bg3); border: 1px solid var(--line); border-radius: 10px;
+    padding: 10px; cursor: pointer; text-align: left;
     transition: border-color .2s, background .2s;
-    position: relative;
-    width: 100%;
+    position: relative; width: 100%;
   }
   .al-show-card:hover { border-color: var(--txt3); background: var(--bg4); }
-  .al-show-card.active {
-    border-color: var(--red-mid);
-    background: var(--red-dim);
-  }
-
-  .al-show-thumb {
-    width: 56px; height: 40px; object-fit: cover;
-    border-radius: 6px; flex-shrink: 0;
-    background: var(--bg4);
-  }
+  .al-show-card.active { border-color: var(--red-mid); background: var(--red-dim); }
+  .al-show-thumb { width: 56px; height: 40px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: var(--bg4); }
   .al-show-info { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
-  .al-show-title {
-    font-size: 12px; font-weight: 600; color: var(--txt);
-    line-height: 1.3;
-    display: -webkit-box; -webkit-line-clamp: 2;
-    -webkit-box-orient: vertical; overflow: hidden;
-  }
-  .al-show-meta {
-    display: flex; align-items: center; gap: 5px;
-    font-size: 10px; color: var(--txt2); font-family: var(--mono);
-  }
-  .al-show-slug {
-    font-family: var(--mono); font-size: 9px;
-    color: var(--txt3); overflow: hidden;
-    text-overflow: ellipsis; white-space: nowrap;
-  }
-  .al-active-indicator {
-    position: absolute; right: 10px; top: 50%;
-    transform: translateY(-50%);
-    color: var(--red); font-size: 10px;
-  }
+  .al-show-title { font-size: 12px; font-weight: 600; color: var(--txt); line-height: 1.3; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .al-show-meta { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--txt2); font-family: var(--mono); }
+  .al-show-slug { font-family: var(--mono); font-size: 9px; color: var(--txt3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .al-active-indicator { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--red); font-size: 10px; }
 
-  /* Status dot */
-  .al-dot {
-    width: 6px; height: 6px; border-radius: 50%;
-    display: inline-block; flex-shrink: 0;
-  }
+  .al-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .al-dot.live      { background: #22c55e; animation: pulse 1.5s infinite; }
   .al-dot.scheduled { background: #f59e0b; }
   .al-dot.ended     { background: #555; }
 
   .al-skeleton {
     background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%);
-    background-size: 400px 100%;
-    animation: shimmer 1.4s infinite linear;
-    border-radius: 8px;
+    background-size: 400px 100%; animation: shimmer 1.4s infinite linear; border-radius: 8px;
   }
-
   .al-empty { color: var(--txt3); font-size: 13px; text-align: center; padding: 24px 0; }
 
-  /* Main */
-  .al-main {
-    flex: 1; padding: 24px;
-    overflow-y: auto;
-    display: flex; flex-direction: column; gap: 16px;
-    animation: fadeIn .3s ease;
-  }
+  /* ── MAIN ── */
+  .al-main { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; animation: fadeIn .3s ease; }
+  .al-no-select { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--txt3); font-size: 15px; text-align: center; padding: 60px 0; }
 
-  .al-no-select {
-    flex: 1; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 12px; color: var(--txt3);
-    font-size: 15px; text-align: center;
-    padding: 60px 0;
-  }
+  .al-meta-bar { display: flex; align-items: center; gap: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .al-creator-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid var(--line); }
+  .al-stream-title { font-family: var(--display); font-size: 16px; font-weight: 800; color: var(--txt); line-height: 1.2; }
+  .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
+  .al-price-badge { margin-left: auto; flex-shrink: 0; background: #f59e0b22; border: 1px solid #f59e0b44; color: #f59e0b; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; font-family: var(--mono); }
 
-  /* Meta bar */
-  .al-meta-bar {
-    display: flex; align-items: center; gap: 14px;
-    background: var(--bg2);
-    border: 1px solid var(--line);
-    border-radius: 12px; padding: 14px 18px;
-  }
-  .al-creator-img {
-    width: 44px; height: 44px; border-radius: 50%;
-    object-fit: cover; flex-shrink: 0;
-    border: 2px solid var(--line);
-  }
-  .al-stream-title {
-    font-family: var(--display);
-    font-size: 16px; font-weight: 800;
-    color: var(--txt); line-height: 1.2;
-  }
-  .al-stream-sub {
-    display: flex; align-items: center; gap: 6px;
-    color: var(--txt2); font-size: 12px; font-family: var(--mono);
-    margin-top: 4px;
-  }
-  .al-price-badge {
-    margin-left: auto; flex-shrink: 0;
-    background: #f59e0b22; border: 1px solid #f59e0b44;
-    color: #f59e0b; font-size: 12px; font-weight: 700;
-    padding: 4px 12px; border-radius: 20px;
-    font-family: var(--mono);
-  }
+  .al-player-wrap { border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line); min-height: 200px; position: relative; }
+  .al-stream-loading, .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
 
-  /* Player */
-  .al-player-wrap {
-    border-radius: 12px; overflow: hidden;
-    background: #000;
-    border: 1px solid var(--line);
-    min-height: 200px;
-    position: relative;
-  }
-  .al-stream-loading,
-  .al-stream-err {
-    min-height: 320px; display: flex; flex-direction: column;
-    align-items: center; justify-content: center;
-    gap: 12px; text-align: center;
-    color: var(--txt2); font-size: 14px; background: var(--bg3);
-  }
-
-  /* Quality row */
-  .al-quality-row {
-    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
-  }
+  /* Quality */
+  .al-quality-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .al-quality-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
-  .al-quality-chip {
-    background: var(--bg3); border: 1px solid var(--line);
-    color: var(--txt2); font-size: 11px;
-    padding: 3px 10px; border-radius: 20px;
-    font-family: var(--mono);
-  }
+  .al-quality-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 11px; padding: 3px 10px; border-radius: 20px; font-family: var(--mono); }
   .al-quality-chip em { color: var(--txt3); font-style: normal; }
 
-  /* Slug row */
-  .al-slug-row {
-    display: flex; align-items: center; gap: 8px;
-    background: var(--bg2); border: 1px solid var(--line);
-    border-radius: 8px; padding: 10px 14px;
-  }
+  /* Session info */
+  .al-session-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+  .al-session-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 10px; padding: 2px 8px; border-radius: 4px; font-family: var(--mono); }
+  .al-session-chip em { color: var(--txt3); font-style: normal; margin-right: 4px; }
+
+  /* Slug */
+  .al-slug-row { display: flex; align-items: center; gap: 8px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
   .al-slug-label { color: var(--txt3); font-size: 11px; flex-shrink: 0; }
-  .al-slug-code {
-    flex: 1; font-family: var(--mono); font-size: 12px;
-    color: var(--txt2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  }
+  .al-slug-code { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--txt2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   /* Description */
-  .al-desc {
-    background: var(--bg2); border: 1px solid var(--line);
-    border-radius: 10px; padding: 16px 18px;
-  }
-  .al-desc h4 {
-    font-size: 11px; font-weight: 700; letter-spacing: 1.5px;
-    color: var(--txt3); text-transform: uppercase; margin-bottom: 8px;
-  }
-  .al-desc p {
-    font-size: 13px; color: var(--txt2);
-    line-height: 1.7; white-space: pre-line;
-  }
+  .al-desc { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
+  .al-desc h4 { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--txt3); text-transform: uppercase; margin-bottom: 8px; }
+  .al-desc p { font-size: 13px; color: var(--txt2); line-height: 1.7; white-space: pre-line; }
 
   /* Responsive */
   @media (max-width: 768px) {
     .al-content { flex-direction: column; }
-    .al-sidebar {
-      width: 100%; position: static;
-      max-height: 280px; border-right: none;
-      border-bottom: 1px solid var(--line);
-    }
+    .al-sidebar { width: 100%; position: static; max-height: 280px; border-right: none; border-bottom: 1px solid var(--line); }
     .al-today { display: none; }
     .al-show-list { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
     .al-show-card { min-width: 200px; }
