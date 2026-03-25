@@ -14,6 +14,45 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
+// ── DevTools Detection Hook ───────────────────────────────────────────────
+function useDevToolsDetection() {
+  const [devToolsOpen, setDevToolsOpen] = useState(false);
+
+  useEffect(() => {
+    const threshold = 160;
+    const check = () => {
+      const widthDiff  = window.outerWidth  - window.innerWidth  > threshold;
+      const heightDiff = window.outerHeight - window.innerHeight > threshold;
+      setDevToolsOpen(widthDiff || heightDiff);
+    };
+
+    check();
+    const interval = setInterval(check, 1000);
+    return () => clearInterval(interval);
+  }, []);
+
+  return devToolsOpen;
+}
+
+// ── DevTools Blocker Component ────────────────────────────────────────────
+function DevToolsBlocker() {
+  return (
+    <div style={{
+      display: "flex", alignItems: "center", justifyContent: "center",
+      minHeight: "100vh",
+      background: "linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 50%, #0f0f0f 100%)",
+      flexDirection: "column", gap: "20px", textAlign: "center", padding: "40px",
+    }}>
+      <h2 style={{ color: "#e50914", fontSize: "28px", fontWeight: 700 }}>
+        ⚠ Akses Diblokir
+      </h2>
+      <p style={{ color: "rgba(255,255,255,0.7)", fontSize: "16px" }}>
+        Tutup Developer Tools untuk melanjutkan menonton.
+      </p>
+    </div>
+  );
+}
+
 /** Ambil session login dari sessionStorage (sama seperti ProfilePage) */
 const getSession = () => {
   try {
