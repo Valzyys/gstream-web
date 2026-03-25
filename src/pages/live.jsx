@@ -133,7 +133,6 @@ function LiveStream() {
   const navigate       = useNavigate();
 
   // ── DevTools guard ────────────────────────────────────────────────────────
-  const devToolsOpen = useDevToolsDetection();
 
   // ── Auth / membership state ───────────────────────────────────────────────
   const [membershipChecked,  setMembershipChecked]  = useState(false);
@@ -641,7 +640,7 @@ function LiveStream() {
   // ══════════════════════════════════════════════════════════════════════════
   // DevTools aktif → tampilkan blocker, hentikan semua proses UI
   // ══════════════════════════════════════════════════════════════════════════
-  if (devToolsOpen) return <DevToolsBlocker />;
+
 
   // ── Membership loading ────────────────────────────────────────────────────
   if (membershipLoading) {
