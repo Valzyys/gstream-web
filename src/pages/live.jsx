@@ -14,45 +14,111 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
-// ── DevTools Detection Hook ───────────────────────────────────────────────
+// ── DevTools Detection ────────────────────────────────────────────────────────
 function useDevToolsDetection() {
   const [devToolsOpen, setDevToolsOpen] = useState(false);
+  const intervalRef = useRef(null);
+  const thresholdRef = useRef(160);
 
   useEffect(() => {
-    const threshold = 160;
-    const check = () => {
-      const widthDiff  = window.outerWidth  - window.innerWidth  > threshold;
-      const heightDiff = window.outerHeight - window.innerHeight > threshold;
-      setDevToolsOpen(widthDiff || heightDiff);
+    // Method 1: window size difference (most reliable)
+    const checkBySize = () => {
+      const widthDiff  = window.outerWidth  - window.innerWidth;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      return widthDiff > thresholdRef.current || heightDiff > thresholdRef.current;
     };
 
-    check();
-    const interval = setInterval(check, 1000);
-    return () => clearInterval(interval);
+    // Method 2: console timing trick
+    let devtoolsOpenByConsole = false;
+    const element = new Image();
+    Object.defineProperty(element, "id", {
+      get() {
+        devtoolsOpenByConsole = true;
+        return "";
+      },
+    });
+
+    const detect = () => {
+      devtoolsOpenByConsole = false;
+      // trigger console getter trick
+      console.log("%c", element);   // eslint-disable-line no-console
+      console.clear();              // eslint-disable-line no-console
+
+      const bySize    = checkBySize();
+      const byConsole = devtoolsOpenByConsole;
+      const detected  = bySize || byConsole;
+
+      setDevToolsOpen((prev) => {
+        if (prev !== detected) return detected;
+        return prev;
+      });
+    };
+
+    detect();
+    intervalRef.current = setInterval(detect, 500);
+
+    // Method 3: debugger timing
+    const debuggerCheck = () => {
+      const start = performance.now();
+      // eslint-disable-next-line no-debugger
+      debugger;
+      const delta = performance.now() - start;
+      if (delta > 100) setDevToolsOpen(true);
+    };
+    // run once
+    debuggerCheck();
+
+    return () => {
+      clearInterval(intervalRef.current);
+    };
   }, []);
 
   return devToolsOpen;
 }
 
-// ── DevTools Blocker Component ────────────────────────────────────────────
+// ── DevTools Blocker UI ───────────────────────────────────────────────────────
 function DevToolsBlocker() {
+  // Stop any audio/video when this mounts
+  useEffect(() => {
+    document.querySelectorAll("video, audio").forEach((el) => {
+      try { el.pause(); el.src = ""; } catch {}
+    });
+  }, []);
+
   return (
     <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
-      minHeight: "100vh",
-      background: "linear-gradient(135deg, #0a0a0a 0%, #1a1a1a 50%, #0f0f0f 100%)",
-      flexDirection: "column", gap: "20px", textAlign: "center", padding: "40px",
+      position: "fixed", inset: 0,
+      background: "#000",
+      zIndex: 999999,
+      display: "flex", flexDirection: "column",
+      alignItems: "center", justifyContent: "center",
+      gap: "16px",
+      userSelect: "none",
     }}>
-      <h2 style={{ color: "#e50914", fontSize: "28px", fontWeight: 700 }}>
-        ⚠ Akses Diblokir
-      </h2>
-      <p style={{ color: "rgba(255,255,255,0.7)", fontSize: "16px" }}>
-        Tutup Developer Tools untuk melanjutkan menonton.
+      <span style={{ fontSize: "52px" }}>🚫</span>
+      <p style={{
+        color: "#fff",
+        fontSize: "clamp(1.4rem, 4vw, 2.2rem)",
+        fontWeight: 800,
+        margin: 0,
+        letterSpacing: "2px",
+        textAlign: "center",
+        padding: "0 24px",
+      }}>
+        Mau ngapain?
+      </p>
+      <p style={{
+        color: "#555",
+        fontSize: "13px",
+        margin: 0,
+        textAlign: "center",
+        padding: "0 32px",
+      }}>
+        Tutup Developer Tools untuk melanjutkan.
       </p>
     </div>
   );
 }
-
 /** Ambil session login dari sessionStorage (sama seperti ProfilePage) */
 const getSession = () => {
   try {
