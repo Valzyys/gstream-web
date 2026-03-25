@@ -5,16 +5,95 @@ import { createClient } from "@supabase/supabase-js"; // <-- Import Supabase
 import "../styles/live-stream.css";
 
 // ── KONFIGURASI SUPABASE ──────────────────────────────────────────────────────
+// FIX: URL harus dimulai dengan https:// agar aplikasi tidak blank / crash
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || "https://mzxfuaoihgzxvokwarao.supabase.co";
 const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16eGZ1YW9paGd6eHZva3dhcmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MDg0NjIsImV4cCI6MjA4OTk4NDQ2Mn0.OFYCkBFXCSfLn-wG94OHHKL5CX8T_BLrbDGPiBdPIog";
 const supabase = createClient(supabaseUrl, supabaseKey);
 // ─────────────────────────────────────────────────────────────────────────────
 
 // ── DevTools Detection ────────────────────────────────────────────────────────
+function useDevToolsDetection() {
+  const [devToolsOpen, setDevToolsOpen] = useState(false);
+  const intervalRef = useRef(null);
+  const thresholdRef = useRef(160);
+
+  useEffect(() => {
+    const checkBySize = () => {
+      const widthDiff  = window.outerWidth  - window.innerWidth;
+      const heightDiff = window.outerHeight - window.innerHeight;
+      return widthDiff > thresholdRef.current || heightDiff > thresholdRef.current;
+    };
+
+    let devtoolsOpenByConsole = false;
+    const element = new Image();
+    Object.defineProperty(element, "id", {
+      get() {
+        devtoolsOpenByConsole = true;
+        return "";
+      },
+    });
+
+    const detect = () => {
+      devtoolsOpenByConsole = false;
+      console.log("%c", element);   // eslint-disable-line no-console
+      console.clear();              // eslint-disable-line no-console
+
+      const bySize    = checkBySize();
+      const byConsole = devtoolsOpenByConsole;
+      const detected  = bySize || byConsole;
+
+      setDevToolsOpen((prev) => {
+        if (prev !== detected) return detected;
+        return prev;
+      });
+    };
+
+    detect();
+    intervalRef.current = setInterval(detect, 500);
+
+    const debuggerCheck = () => {
+      const start = performance.now();
+      // eslint-disable-next-line no-debugger
+      debugger;
+      const delta = performance.now() - start;
+      if (delta > 100) setDevToolsOpen(true);
+    };
+    debuggerCheck();
+
+    return () => clearInterval(intervalRef.current);
+  }, []);
+
+  return devToolsOpen;
+}
+
+// ── DevTools Blocker UI ───────────────────────────────────────────────────────
+function DevToolsBlocker() {
+  useEffect(() => {
+    document.querySelectorAll("video, audio").forEach((el) => {
+      try { el.pause(); el.src = ""; } catch {}
+    });
+  }, []);
+
+  return (
+    <div style={{
+      position: "fixed", inset: 0, background: "#000", zIndex: 999999,
+      display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center",
+      gap: "16px", userSelect: "none",
+    }}>
+      <span style={{ fontSize: "52px" }}>🚫</span>
+      <p style={{ color: "#fff", fontSize: "clamp(1.4rem, 4vw, 2.2rem)", fontWeight: 800, margin: 0, letterSpacing: "2px", textAlign: "center", padding: "0 24px" }}>
+        Mau ngapain?
+      </p>
+      <p style={{ color: "#555", fontSize: "13px", margin: 0, textAlign: "center", padding: "0 32px" }}>
+        Tutup Developer Tools untuk melanjutkan.
+      </p>
+    </div>
+  );
+}
+
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
-/** Ambil session login dari sessionStorage (sama seperti ProfilePage) */
 const getSession = () => {
   try {
     const d = JSON.parse(sessionStorage.getItem("userLogin") || localStorage.getItem("userLogin") || "null");
@@ -27,15 +106,12 @@ function LiveStream() {
   const { playbackId } = useParams();
   const navigate       = useNavigate();
 
-  // ── DevTools guard ────────────────────────────────────────────────────────
   const devToolsOpen = useDevToolsDetection();
 
-  // ── Auth / membership state ───────────────────────────────────────────────
   const [membershipChecked,  setMembershipChecked]  = useState(false);
   const [hasMonthlymember,   setHasMonthlyMember]   = useState(false);
   const [membershipLoading,  setMembershipLoading]  = useState(true);
 
-  // ── Verification state (fallback jika tidak punya membership) ────────────
   const [isVerified,        setIsVerified]        = useState(false);
   const [showVerification,  setShowVerification]  = useState(false);
   const [verificationData,  setVerificationData]  = useState({ email: "", code: "" });
@@ -43,7 +119,6 @@ function LiveStream() {
   const [verifying,         setVerifying]         = useState(false);
   const [clientIP,          setClientIP]          = useState("");
 
-  // ── Stream state ──────────────────────────────────────────────────────────
   const [loading,        setLoading]        = useState(true);
   const [error,          setError]          = useState("");
   const [streamData,     setStreamData]     = useState(null);
@@ -51,7 +126,7 @@ function LiveStream() {
   const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
-  // ── CHAT STATE ────────────────────────────────────────────────────────────
+  // ── CHAT STATE ──
   const [chatMessages, setChatMessages] = useState([]);
   const [chatInput, setChatInput] = useState("");
   const [chatUser, setChatUser] = useState(null);
@@ -59,7 +134,6 @@ function LiveStream() {
   const chatEndRef = useRef(null);
   const channelRef = useRef(null);
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
   const fetchClientIP = async () => {
     try {
       const res  = await fetch("https://api.ipify.org?format=json");
@@ -69,7 +143,6 @@ function LiveStream() {
     } catch { return "unknown"; }
   };
 
-  // ── Step 1: Cek membership dari session login ─────────────────────────────
   const checkMembership = useCallback(async () => {
     setMembershipLoading(true);
     const session = getSession();
@@ -92,17 +165,9 @@ function LiveStream() {
     }
 
     try {
-      const res  = await fetch(
-        `${API_BASE}/membership/status/${uid}?apikey=${API_KEY}`,
-        { headers: { Authorization: `Bearer ${token}` } }
-      );
+      const res  = await fetch(`${API_BASE}/membership/status/${uid}?apikey=${API_KEY}`, { headers: { Authorization: `Bearer ${token}` } });
       const data = await res.json();
-
-      if (
-        data.status &&
-        data.data?.is_active &&
-        data.data?.membership_type === "monthly"
-      ) {
+      if (data.status && data.data?.is_active && data.data?.membership_type === "monthly") {
         setHasMonthlyMember(true);
         setMembershipChecked(true);
         setMembershipLoading(false);
@@ -118,127 +183,73 @@ function LiveStream() {
     return false;
   }, []);
 
-  // ── Verification code logic ───────────────────────────────────────────────
   const verifyAccess = async () => {
     if (!verificationData.email || !verificationData.code) {
       setVerificationError("Email dan code wajib diisi");
       return;
     }
-
     setVerifying(true);
     setVerificationError("");
 
     try {
       const ip = clientIP || (await fetchClientIP());
-
-      const verifyResponse = await fetch(
-        "https://v2.jkt48connect.com/api/codes/verify",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email:  verificationData.email,
-            code:   verificationData.code,
-            apikey: "JKTCONNECT",
-          }),
-        }
-      );
-
+      const verifyResponse = await fetch("https://v2.jkt48connect.com/api/codes/verify", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationData.email, code: verificationData.code, apikey: "JKTCONNECT" }),
+      });
       const verifyData = await verifyResponse.json();
 
       if (!verifyData.status) {
         setVerificationError(verifyData.message || "Code tidak valid atau sudah kedaluwarsa");
-        setVerifying(false);
-        return;
+        setVerifying(false); return;
       }
 
       const codeData = verifyData.data;
-
       if (!codeData.is_active) {
         setVerificationError("Code ini sudah tidak aktif");
-        setVerifying(false);
-        return;
+        setVerifying(false); return;
       }
 
-      const usageCount       = parseInt(codeData.usage_count) || 0;
-      const usageLimit       = parseInt(codeData.usage_limit)  || 1;
+      const usageCount = parseInt(codeData.usage_count) || 0;
+      const usageLimit = parseInt(codeData.usage_limit) || 1;
       const hasUsageRemaining = usageCount < usageLimit;
 
       if (codeData.is_used && !hasUsageRemaining) {
-        const listResponse = await fetch(
-          `https://v2.jkt48connect.com/api/codes/list?email=${verificationData.email}&apikey=JKTCONNECT`
-        );
+        const listResponse = await fetch(`https://v2.jkt48connect.com/api/codes/list?email=${verificationData.email}&apikey=JKTCONNECT`);
         const listData = await listResponse.json();
 
         if (listData.status && listData.data.wotatokens) {
-          const userCode = listData.data.wotatokens.find(
-            (c) => c.code === verificationData.code
-          );
-
+          const userCode = listData.data.wotatokens.find((c) => c.code === verificationData.code);
           if (userCode) {
-            if (
-              userCode.ip_address &&
-              userCode.ip_address !== "" &&
-              userCode.ip_address !== ip
-            ) {
+            if (userCode.ip_address && userCode.ip_address !== "" && userCode.ip_address !== ip) {
               setVerificationError("Code ini sudah digunakan dari IP address yang berbeda");
-              setVerifying(false);
-              return;
+              setVerifying(false); return;
             }
-
-            const sessionData = {
-              email:     verificationData.email,
-              code:      verificationData.code,
-              ip,
-              timestamp: Date.now(),
-              verified:  true,
-            };
+            const sessionData = { email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true };
             localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-            setIsVerified(true);
-            setShowVerification(false);
-            setVerifying(false);
-            return;
+            setIsVerified(true); setShowVerification(false); setVerifying(false); return;
           }
         }
-
         setVerificationError("Code sudah tidak dapat digunakan");
-        setVerifying(false);
-        return;
+        setVerifying(false); return;
       }
 
-      const useResponse = await fetch(
-        "https://v2.jkt48connect.com/api/codes/use",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email:  verificationData.email,
-            code:   verificationData.code,
-            apikey: "JKTCONNECT",
-          }),
-        }
-      );
-
+      const useResponse = await fetch("https://v2.jkt48connect.com/api/codes/use", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationData.email, code: verificationData.code, apikey: "JKTCONNECT" }),
+      });
       const useData = await useResponse.json();
 
       if (useData.status) {
-        const sessionData = {
-          email:     verificationData.email,
-          code:      verificationData.code,
-          ip,
-          timestamp: Date.now(),
-          verified:  true,
-        };
+        const sessionData = { email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true };
         localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-        setIsVerified(true);
-        setShowVerification(false);
-        setVerifying(false);
+        setIsVerified(true); setShowVerification(false); setVerifying(false);
       } else {
         setVerificationError(useData.message || "Gagal menggunakan code");
         setVerifying(false);
       }
     } catch {
-      setVerificationError("Terjadi kesalahan saat verifikasi. Silakan coba lagi.");
+      setVerificationError("Terjadi kesalahan saat verifikasi.");
       setVerifying(false);
     }
   };
@@ -246,49 +257,33 @@ function LiveStream() {
   const checkExistingVerification = async () => {
     const stored = localStorage.getItem("stream_verification");
     if (!stored) { setShowVerification(true); return false; }
-
     try {
       const info = JSON.parse(stored);
       if (!info.verified || !info.timestamp) {
-        localStorage.removeItem("stream_verification");
-        setShowVerification(true);
-        return false;
+        localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
       }
-
-      const hoursDiff = (Date.now() - info.timestamp) / (1000 * 60 * 60);
-      if (hoursDiff > 5) {
-        localStorage.removeItem("stream_verification");
-        setShowVerification(true);
-        return false;
+      if ((Date.now() - info.timestamp) / (1000 * 60 * 60) > 5) {
+        localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
       }
-
       const ip = await fetchClientIP();
       if (info.ip !== ip) {
-        info.ip = ip;
-        localStorage.setItem("stream_verification", JSON.stringify(info));
+        info.ip = ip; localStorage.setItem("stream_verification", JSON.stringify(info));
       }
-
-      setIsVerified(true);
-      setShowVerification(false);
+      setIsVerified(true); setShowVerification(false);
       setVerificationData({ email: info.email, code: info.code });
       return true;
     } catch {
-      localStorage.removeItem("stream_verification");
-      setShowVerification(true);
-      return false;
+      localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
     }
   };
 
-  // ── Stream helpers ────────────────────────────────────────────────────────
   const fetchNearestShow = async () => {
     try {
       const res  = await fetch("https://v2.jkt48connect.com/api/jkt48/theater?apikey=JKTCONNECT");
       const data = await res.json();
-
       if (data.theater?.length > 0) {
         const now = new Date();
-        let nearestShow = null;
-        let smallestDiff = Infinity;
+        let nearestShow = null; let smallestDiff = Infinity;
         data.theater.forEach((show) => {
           const diff = Math.abs(new Date(show.date) - now);
           if (diff < smallestDiff) { smallestDiff = diff; nearestShow = show; }
@@ -323,39 +318,28 @@ function LiveStream() {
       setTimeout(() => {
         setStreamData({
           playbackId,
-          title:    nearestShow ? nearestShow.title : "Live Stream JKT48",
+          title: nearestShow ? nearestShow.title : "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
         setLoading(false);
       }, 500);
     } catch {
-      setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
+      setError("Terjadi kesalahan saat memuat stream.");
       setLoading(false);
     }
   };
 
-  // ── Init & Auth Chat ──────────────────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
       await fetchClientIP();
-
-      // Cek membership monthly terlebih dahulu
       const hasMonthly = await checkMembership();
-
       if (hasMonthly) {
-        setIsVerified(true);
-        setShowVerification(false);
-        loadStreamData();
+        setIsVerified(true); setShowVerification(false); loadStreamData();
       } else {
         const verified = await checkExistingVerification();
-        if (verified) {
-          loadStreamData();
-        } else {
-          setLoading(false);
-        }
+        if (verified) loadStreamData(); else setLoading(false);
       }
     };
-
     init();
 
     // --- AUTO REGISTER & LOGIN CHAT DARI LOCALSTORAGE ---
@@ -364,43 +348,34 @@ function LiveStream() {
       let userData = null;
 
       try {
-        // Cari data user di localStorage atau sessionStorage
         const rawData = localStorage.getItem("userLogin") || sessionStorage.getItem("userLogin");
         if (rawData) {
           const parsed = JSON.parse(rawData);
-          // Tangkap format object user (bisa jadi di dalam properti .user atau langsung)
           userData = parsed?.user || parsed;
         }
       } catch (e) { console.error("Error parsing local user data", e); }
 
-      // Jika data user ada (username wajib ada)
       if (userData && (userData.username || userData.name)) {
-        const username = userData.username || userData.name;
-        // Fallback email/avatar jika tidak ada di localstorage
+        // FIX: Pengaman String() untuk mencegah crash saat replace()
+        const username = String(userData.username || userData.name);
         const email = userData.email || `${username.replace(/\s+/g, '')}@jkt48connect.local`;
         const avatar_url = userData.avatar_url || `https://ui-avatars.com/api/?name=${username}`;
 
         try {
-          // 1. AUTO REGISTER KE API (Sama seperti code di terminal)
+          // 1. AUTO REGISTER
           await fetch(`https://v2.jkt48connect.com/api/chatstream/register?apikey=${API_KEY}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              username: username,
-              email: email,
-              avatar_url: avatar_url,
-            }),
+            body: JSON.stringify({ username, email, avatar_url }),
           });
-          // Kita biarkan berlanjut (mau status true/false karena bisa jadi sudah terdaftar)
 
-          // 2. AUTO LOGIN/VERIFIKASI KE SUPABASE
+          // 2. AUTO LOGIN/VERIFIKASI
           const { data: user, error } = await supabase
             .from("dashboard_v2_users")
             .select("id, username, avatar_url, role, bluetick, is_verified")
             .eq("username", username.toLowerCase())
             .single();
 
-          // Hanya set chat user jika is_verified == true
           if (!error && user && user.is_verified) {
             setChatUser(user);
           } else {
@@ -415,7 +390,7 @@ function LiveStream() {
 
     initChatUser();
 
-    // --- SETUP SUPABASE REALTIME CHANNEL ---
+    // --- SETUP REALTIME CHANNEL ---
     const channel = supabase.channel("live-chat", {
       config: { broadcast: { ack: true } },
     });
@@ -423,7 +398,6 @@ function LiveStream() {
     channel
       .on("broadcast", { event: "pesan_baru" }, (response) => {
         const payload = response.payload;
-        // Mencegah pesan duplikat akibat optimistic update
         setChatMessages((prev) => {
           const isExist = prev.some(msg => msg.timestamp === payload.timestamp && msg.username === payload.username);
           if (isExist) return prev;
@@ -445,12 +419,10 @@ function LiveStream() {
     }
   }, [isVerified, membershipChecked]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // Scroll otomatis chat
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  // ── UI Handlers ───────────────────────────────────────────────────────────
   const handleInputChange = (e) => {
     const { name, value } = e.target;
     setVerificationData((prev) => ({ ...prev, [name]: value }));
@@ -459,14 +431,12 @@ function LiveStream() {
 
   const handleVerificationSubmit = (e) => { e.preventDefault(); verifyAccess(); };
 
-  const goBack     = () => navigate(-1);
+  const goBack = () => navigate(-1);
 
   const handleLogout = () => {
     localStorage.removeItem("stream_verification");
-    setIsVerified(false);
-    setShowVerification(true);
-    setStreamData(null);
-    setVerificationData({ email: "", code: "" });
+    setIsVerified(false); setShowVerification(true);
+    setStreamData(null); setVerificationData({ email: "", code: "" });
   };
 
   const handleSendMessage = async (e) => {
@@ -483,11 +453,9 @@ function LiveStream() {
       timestamp: new Date().toISOString(),
     };
 
-    // Optimistic Update (Langsung tampil di UI lokal)
     setChatMessages((prev) => [...prev, payload]);
     setChatInput("");
 
-    // Broadcast ke Supabase Realtime
     await channelRef.current.send({
       type: "broadcast",
       event: "pesan_baru",
@@ -495,25 +463,9 @@ function LiveStream() {
     });
   };
 
-  // ══════════════════════════════════════════════════════════════════════════
-  // DevTools aktif → tampilkan blocker, hentikan semua proses UI
-  // ══════════════════════════════════════════════════════════════════════════
   if (devToolsOpen) return <DevToolsBlocker />;
-
-  // ── Membership loading ────────────────────────────────────────────────────
-  if (membershipLoading) {
-    return (
-      <div className="loading-container">
-        <div className="loading-content">
-          <div className="spinner-large"></div>
-          <h2>Memeriksa akses...</h2>
-          <p>Sedang memverifikasi membership kamu</p>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Verification screen ───────────────────────────────────────────────────
+  if (membershipLoading) return <div className="loading-container"><div className="loading-content"><div className="spinner-large"></div><h2>Memeriksa akses...</h2><p>Sedang memverifikasi membership kamu</p></div></div>;
+  
   if (showVerification && !isVerified) {
     return (
       <div className="verification-page">
@@ -521,62 +473,20 @@ function LiveStream() {
           <div className="verification-card">
             <h1>Verifikasi Akses</h1>
             <p>Masukkan email dan code untuk mengakses live stream</p>
-
             <form onSubmit={handleVerificationSubmit}>
-              <div className="form-group">
-                <label>Email</label>
-                <input
-                  type="email" name="email"
-                  value={verificationData.email}
-                  onChange={handleInputChange}
-                  placeholder="email@example.com" required
-                />
-              </div>
-
-              <div className="form-group">
-                <label>Verification Code</label>
-                <input
-                  type="text" name="code"
-                  value={verificationData.code}
-                  onChange={handleInputChange}
-                  placeholder="Masukkan code" required
-                />
-              </div>
-
-              {verificationError && (
-                <div className="error-message">{verificationError}</div>
-              )}
-
-              {verifying ? (
-                <button type="button" className="verify-button" disabled>
-                  <span className="spinner"></span> Memverifikasi...
-                </button>
-              ) : (
-                <button type="submit" className="verify-button">
-                  ✓ Verifikasi Akses
-                </button>
-              )}
+              <div className="form-group"><label>Email</label><input type="email" name="email" value={verificationData.email} onChange={handleInputChange} placeholder="email@example.com" required /></div>
+              <div className="form-group"><label>Verification Code</label><input type="text" name="code" value={verificationData.code} onChange={handleInputChange} placeholder="Masukkan code" required /></div>
+              {verificationError && <div className="error-message">{verificationError}</div>}
+              {verifying ? <button type="button" className="verify-button" disabled><span className="spinner"></span> Memverifikasi...</button> : <button type="submit" className="verify-button">✓ Verifikasi Akses</button>}
             </form>
-
             <div className="verification-info">
               <p>!<strong>Informasi:</strong></p>
               <ul>
                 <li>Code verifikasi hanya dapat digunakan sekali</li>
-                <li>IP address akan dicatat untuk keamanan</li>
                 <li>Akses berlaku selama 5 jam</li>
-                <li>Session tetap aktif saat refresh halaman</li>
-                <li>
-                  Punya membership monthly?{" "}
-                  <span
-                    style={{ color: "#DC1F2E", cursor: "pointer", fontWeight: 700 }}
-                    onClick={() => navigate("/login")}
-                  >
-                    Login di sini
-                  </span>
-                </li>
+                <li>Punya membership monthly? <span style={{ color: "#DC1F2E", cursor: "pointer", fontWeight: 700 }} onClick={() => navigate("/login")}>Login di sini</span></li>
               </ul>
             </div>
-
             <button onClick={goBack} className="back-button">← Kembali</button>
           </div>
         </div>
@@ -584,60 +494,17 @@ function LiveStream() {
     );
   }
 
-  // ── Loading ───────────────────────────────────────────────────────────────
-  if (loading) {
-    return (
-      <div className="loading-container">
-        <div className="loading-content">
-          <div className="spinner-large"></div>
-          <h2>Memuat live stream...</h2>
-          <p>Mengambil informasi show...</p>
-        </div>
-      </div>
-    );
-  }
+  if (loading) return <div className="loading-container"><div className="loading-content"><div className="spinner-large"></div><h2>Memuat live stream...</h2></div></div>;
+  if (error || !streamData) return <div className="error-container"><div className="error-content"><div className="error-icon"></div><h2>Terjadi Kesalahan</h2><p>{error || "Tidak dapat memuat live stream"}</p><button onClick={goBack} className="back-button">← Kembali</button></div></div>;
 
-  // ── Error ─────────────────────────────────────────────────────────────────
-  if (error || !streamData) {
-    return (
-      <div className="error-container">
-        <div className="error-content">
-          <div className="error-icon"></div>
-          <h2>Terjadi Kesalahan</h2>
-          <p>{error || "Tidak dapat memuat live stream"}</p>
-          <button onClick={goBack} className="back-button">← Kembali</button>
-        </div>
-      </div>
-    );
-  }
-
-  // ── Stream (main) ─────────────────────────────────────────────────────────
   return (
     <div className="live-stream-page">
       {/* Header */}
       <div className="stream-header">
         <button onClick={goBack} className="back-btn">← Kembali</button>
-
-        {showInfo && (
-          <div className="show-title">
-            <span>{showInfo.title}</span>
-          </div>
-        )}
-
-        {!hasMonthlymember && (
-          <button onClick={handleLogout} className="logout-btn">Logout</button>
-        )}
-
-        {hasMonthlymember && (
-          <div style={{
-            display: "flex", alignItems: "center", gap: "6px",
-            background: "#DC1F2E18", border: "1px solid #DC1F2E40",
-            borderRadius: "20px", padding: "4px 12px",
-            fontSize: "12px", fontWeight: 700, color: "#DC1F2E",
-          }}>
-            ★ MONTHLY
-          </div>
-        )}
+        {showInfo && <div className="show-title"><span>{showInfo.title}</span></div>}
+        {!hasMonthlymember && <button onClick={handleLogout} className="logout-btn">Logout</button>}
+        {hasMonthlymember && <div style={{ display: "flex", alignItems: "center", gap: "6px", background: "#DC1F2E18", border: "1px solid #DC1F2E40", borderRadius: "20px", padding: "4px 12px", fontSize: "12px", fontWeight: 700, color: "#DC1F2E" }}>★ MONTHLY</div>}
       </div>
 
       {/* ── LAYOUT STREAM & CHAT ── */}
@@ -645,32 +512,15 @@ function LiveStream() {
         
         {/* KIRI: Player & Members */}
         <div className="main-content">
-          {/* Player */}
           <div className="player-container">
-            <MuxPlayer
-              streamType="live"
-              playbackId={streamData.playbackId}
-              metadata={{
-                video_title:    streamData.title,
-                viewer_user_id: streamData.viewerId,
-              }}
-              autoPlay
-            />
+            <MuxPlayer streamType="live" playbackId={streamData.playbackId} metadata={{ video_title: streamData.title, viewer_user_id: streamData.viewerId }} autoPlay />
           </div>
 
-          {/* Lineup Members */}
           {members.length > 0 && (
             <div className="members-section">
-              <div className="members-header">
-                <h3>Lineup Show</h3>
-                <span className="member-count">{members.length} Member</span>
-              </div>
-
+              <div className="members-header"><h3>Lineup Show</h3><span className="member-count">{members.length} Member</span></div>
               {loadingMembers ? (
-                <div className="members-loading">
-                  <div className="spinner"></div>
-                  <p>Memuat lineup...</p>
-                </div>
+                <div className="members-loading"><div className="spinner"></div><p>Memuat lineup...</p></div>
               ) : (
                 <div className="members-grid">
                   {members.map((member) => (
@@ -683,20 +533,14 @@ function LiveStream() {
               )}
             </div>
           )}
-
-          {/* Footer */}
-          <div className="stream-footer">
-            <p>POWERED BY JKT48Connect</p>
-          </div>
+          <div className="stream-footer"><p>POWERED BY JKT48Connect</p></div>
         </div>
 
         {/* KANAN: Sidebar Live Chat */}
         <div className="chat-sidebar">
           <div className="chat-header">
             <span>Live Chat</span>
-            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)" }}>
-              {chatMessages.length} Pesan
-            </span>
+            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)" }}>{chatMessages.length} Pesan</span>
           </div>
 
           <div className="chat-messages">
@@ -705,12 +549,8 @@ function LiveStream() {
                 <img src={msg.avatar_url || "https://ui-avatars.com/api/?name=" + msg.username} alt="avatar" className="chat-avatar" />
                 <div className="chat-message-content">
                   <div className="chat-username">
-                    {msg.role && msg.role !== "member" && (
-                      <span className="chat-role-badge">{msg.role}</span>
-                    )}
+                    {msg.role && msg.role !== "member" && <span className="chat-role-badge">{msg.role}</span>}
                     {msg.username}
-                    
-                    {/* Bluetick Icon */}
                     {msg.bluetick && (
                       <span className="bluetick-icon" title="Verified" style={{ display: "inline-flex", marginLeft: "4px" }}>
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
@@ -732,19 +572,9 @@ function LiveStream() {
               <div className="chat-disabled-overlay">Memuat info akun...</div>
             ) : chatUser ? (
               <form onSubmit={handleSendMessage} className="chat-input-form">
-                <input
-                  type="text"
-                  placeholder={`Kirim sebagai ${chatUser.username}...`}
-                  value={chatInput}
-                  onChange={(e) => setChatInput(e.target.value)}
-                  className="chat-input"
-                  maxLength={200}
-                />
+                <input type="text" placeholder={`Kirim sebagai ${chatUser.username}...`} value={chatInput} onChange={(e) => setChatInput(e.target.value)} className="chat-input" maxLength={200} />
                 <button type="submit" className="chat-send-btn" disabled={!chatInput.trim()}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="22" y1="2" x2="11" y2="13"></line>
-                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
-                  </svg>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><line x1="22" y1="2" x2="11" y2="13"></line><polygon points="22 2 15 22 11 13 2 9 22 2"></polygon></svg>
                 </button>
               </form>
             ) : (
