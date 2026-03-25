@@ -5,8 +5,8 @@ import { createClient } from "@supabase/supabase-js"; // <-- Import Supabase
 import "../styles/live-stream.css";
 
 // ── KONFIGURASI SUPABASE ──────────────────────────────────────────────────────
-const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || "YOUR_SUPABASE_URL";
-const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || "YOUR_SUPABASE_ANON_KEY";
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || "https://mzxfuaoihgzxvokwarao.supabase.co";
+const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16eGZ1YW9paGd6eHZva3dhcmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MDg0NjIsImV4cCI6MjA4OTk4NDQ2Mn0.OFYCkBFXCSfLn-wG94OHHKL5CX8T_BLrbDGPiBdPIog";
 const supabase = createClient(supabaseUrl, supabaseKey);
 // ─────────────────────────────────────────────────────────────────────────────
 
