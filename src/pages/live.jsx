@@ -403,36 +403,30 @@ function LiveStream() {
   let userData = null;
 
   try {
-    // ✅ Ambil dari sessionStorage DULU (sesuai ProfilePage),
-    // fallback ke localStorage jika tidak ada
-    const rawData = 
-      sessionStorage.getItem("userLogin") || 
+    const rawData =
+      sessionStorage.getItem("userLogin") ||
       localStorage.getItem("userLogin");
 
     if (rawData) {
       const parsed = JSON.parse(rawData);
 
-      // ✅ Ambil data profile lengkap dari API jika session valid
       if (parsed?.isLoggedIn && parsed?.token && parsed?.user?.user_id) {
         const uid   = parsed.user.user_id;
         const token = parsed.token;
 
         try {
-          const res  = await fetch(
+          const res = await fetch(
             `${API_BASE}/profile/${uid}?apikey=${API_KEY}`,
             { headers: { Authorization: `Bearer ${token}` } }
           );
           const profileData = await res.json();
 
-          // Gunakan data dari API profile (paling lengkap)
           if (profileData.status && profileData.data) {
-            userData = profileData.data;
+            userData = profileData.data; // ✅ Data lengkap dari API profile
           } else {
-            // Fallback ke data di session
             userData = parsed.user;
           }
         } catch {
-          // Fallback ke data session jika API gagal
           userData = parsed.user;
         }
       } else {
@@ -443,15 +437,18 @@ function LiveStream() {
     console.error("Error parsing user session", e);
   }
 
-  // Jika data user ada (username wajib ada)
   if (userData && (userData.username || userData.full_name)) {
-    // ✅ Gunakan username atau full_name dari ProfilePage
-    const username   = userData.username || userData.full_name;
-    const email      = userData.email || `${username.replace(/\s+/g, '').toLowerCase()}@jkt48connect.local`;
-    const avatar_url = userData.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=7b1c1c&color=fff`;
+    const username = userData.username || userData.full_name;
+    const email    = userData.email || `${username.replace(/\s+/g, '').toLowerCase()}@jkt48connect.local`;
+    
+    // ✅ Pakai userData.avatar (field dari API profile, sama seperti ProfilePage)
+    // Fallback ke UI Avatars dengan warna merah JKT48Connect jika kosong
+    const avatar_url = userData.avatar
+      ? userData.avatar
+      : `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=7b1c1c&color=fff`;
 
     try {
-      // 1. AUTO REGISTER ke API chatstream
+      // 1. Auto register ke chatstream
       await fetch(`${API_BASE}/chatstream/register?apikey=${API_KEY}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -462,17 +459,29 @@ function LiveStream() {
         }),
       });
 
-      // 2. Cek user di Supabase (by username)
-      const { data: user, error } = await supabase
+      // 2. Cek user di Supabase by username
+      const { data: supabaseUser, error } = await supabase
         .from("dashboard_v2_users")
-        .select("id, username, avatar_url, role, bluetick, is_verified")
+        .select("id, username, avatar_url, role, bluetick")
         .eq("username", username.toLowerCase())
         .single();
 
-      if (!error && user && user.is_verified) {
-        setChatUser(user);
+      if (!error && supabaseUser) {
+        // ✅ Tidak cek is_verified — semua user yang login bisa chat
+        // ✅ Override avatar_url dari Supabase dengan avatar dari API profile
+        setChatUser({
+          ...supabaseUser,
+          avatar_url: avatar_url, // Pakai avatar dari profile API, bukan dari Supabase
+        });
       } else {
-        console.log("User chat belum diverifikasi oleh admin.");
+        // ✅ Jika belum ada di Supabase pun, tetap bisa chat pakai data profile
+        setChatUser({
+          id:         userData.user_id || username,
+          username:   username.toLowerCase(),
+          avatar_url: avatar_url,
+          role:       "member",
+          bluetick:   false,
+        });
       }
     } catch (e) {
       console.error("Gagal auto register/login chat", e);
