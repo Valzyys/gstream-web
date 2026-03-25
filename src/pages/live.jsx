@@ -1,123 +1,23 @@
 import { useEffect, useState, useRef, useCallback } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import MuxPlayer from "@mux/mux-player-react";
+import { createClient } from "@supabase/supabase-js"; // <-- Import Supabase
 import "../styles/live-stream.css";
 
-// ── DevTools Detection ────────────────────────────────────────────────────────
-function useDevToolsDetection() {
-  const [devToolsOpen, setDevToolsOpen] = useState(false);
-  const intervalRef = useRef(null);
-  const thresholdRef = useRef(160);
-
-  useEffect(() => {
-    // Method 1: window size difference (most reliable)
-    const checkBySize = () => {
-      const widthDiff  = window.outerWidth  - window.innerWidth;
-      const heightDiff = window.outerHeight - window.innerHeight;
-      return widthDiff > thresholdRef.current || heightDiff > thresholdRef.current;
-    };
-
-    // Method 2: console timing trick
-    let devtoolsOpenByConsole = false;
-    const element = new Image();
-    Object.defineProperty(element, "id", {
-      get() {
-        devtoolsOpenByConsole = true;
-        return "";
-      },
-    });
-
-    const detect = () => {
-      devtoolsOpenByConsole = false;
-      // trigger console getter trick
-      console.log("%c", element);   // eslint-disable-line no-console
-      console.clear();              // eslint-disable-line no-console
-
-      const bySize    = checkBySize();
-      const byConsole = devtoolsOpenByConsole;
-      const detected  = bySize || byConsole;
-
-      setDevToolsOpen((prev) => {
-        if (prev !== detected) return detected;
-        return prev;
-      });
-    };
-
-    detect();
-    intervalRef.current = setInterval(detect, 500);
-
-    // Method 3: debugger timing
-    const debuggerCheck = () => {
-      const start = performance.now();
-      // eslint-disable-next-line no-debugger
-      debugger;
-      const delta = performance.now() - start;
-      if (delta > 100) setDevToolsOpen(true);
-    };
-    // run once
-    debuggerCheck();
-
-    return () => {
-      clearInterval(intervalRef.current);
-    };
-  }, []);
-
-  return devToolsOpen;
-}
-
-// ── DevTools Blocker UI ───────────────────────────────────────────────────────
-function DevToolsBlocker() {
-  // Stop any audio/video when this mounts
-  useEffect(() => {
-    document.querySelectorAll("video, audio").forEach((el) => {
-      try { el.pause(); el.src = ""; } catch {}
-    });
-  }, []);
-
-  return (
-    <div style={{
-      position: "fixed", inset: 0,
-      background: "#000",
-      zIndex: 999999,
-      display: "flex", flexDirection: "column",
-      alignItems: "center", justifyContent: "center",
-      gap: "16px",
-      userSelect: "none",
-    }}>
-      <span style={{ fontSize: "52px" }}>🚫</span>
-      <p style={{
-        color: "#fff",
-        fontSize: "clamp(1.4rem, 4vw, 2.2rem)",
-        fontWeight: 800,
-        margin: 0,
-        letterSpacing: "2px",
-        textAlign: "center",
-        padding: "0 24px",
-      }}>
-        Mau ngapain?
-      </p>
-      <p style={{
-        color: "#555",
-        fontSize: "13px",
-        margin: 0,
-        textAlign: "center",
-        padding: "0 32px",
-      }}>
-        Tutup Developer Tools untuk melanjutkan.
-      </p>
-    </div>
-  );
-}
-
+// ── KONFIGURASI SUPABASE ──────────────────────────────────────────────────────
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL || "https://mzxfuaoihgzxvokwarao.supabase.co";
+const supabaseKey = process.env.REACT_APP_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16eGZ1YW9paGd6eHZva3dhcmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MDg0NjIsImV4cCI6MjA4OTk4NDQ2Mn0.OFYCkBFXCSfLn-wG94OHHKL5CX8T_BLrbDGPiBdPIog";
+const supabase = createClient(supabaseUrl, supabaseKey);
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ── DevTools Detection ────────────────────────────────────────────────────────
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
 /** Ambil session login dari sessionStorage (sama seperti ProfilePage) */
 const getSession = () => {
   try {
-    const d = JSON.parse(sessionStorage.getItem("userLogin") || "null");
+    const d = JSON.parse(sessionStorage.getItem("userLogin") || localStorage.getItem("userLogin") || "null");
     if (d && d.isLoggedIn && d.token) return d;
     return null;
   } catch { return null; }
@@ -151,6 +51,14 @@ function LiveStream() {
   const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
+  // ── CHAT STATE ────────────────────────────────────────────────────────────
+  const [chatMessages, setChatMessages] = useState([]);
+  const [chatInput, setChatInput] = useState("");
+  const [chatUser, setChatUser] = useState(null);
+  const [isChatLoggingIn, setIsChatLoggingIn] = useState(true);
+  const chatEndRef = useRef(null);
+  const channelRef = useRef(null);
+
   // ── Helpers ───────────────────────────────────────────────────────────────
   const fetchClientIP = async () => {
     try {
@@ -167,7 +75,6 @@ function LiveStream() {
     const session = getSession();
 
     if (!session) {
-      // Tidak login → pakai alur verifikasi kode
       setHasMonthlyMember(false);
       setMembershipChecked(true);
       setMembershipLoading(false);
@@ -211,7 +118,7 @@ function LiveStream() {
     return false;
   }, []);
 
-  // ── Verification code logic (tidak berubah dari versi lama) ──────────────
+  // ── Verification code logic ───────────────────────────────────────────────
   const verifyAccess = async () => {
     if (!verificationData.email || !verificationData.code) {
       setVerificationError("Email dan code wajib diisi");
@@ -427,7 +334,7 @@ function LiveStream() {
     }
   };
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Init & Auth Chat ──────────────────────────────────────────────────────
   useEffect(() => {
     const init = async () => {
       await fetchClientIP();
@@ -436,12 +343,10 @@ function LiveStream() {
       const hasMonthly = await checkMembership();
 
       if (hasMonthly) {
-        // ✅ Punya membership monthly → langsung load stream, skip verifikasi kode
         setIsVerified(true);
         setShowVerification(false);
         loadStreamData();
       } else {
-        // ❌ Tidak punya membership monthly → cek kode verifikasi seperti biasa
         const verified = await checkExistingVerification();
         if (verified) {
           loadStreamData();
@@ -452,6 +357,86 @@ function LiveStream() {
     };
 
     init();
+
+    // --- AUTO REGISTER & LOGIN CHAT DARI LOCALSTORAGE ---
+    const initChatUser = async () => {
+      setIsChatLoggingIn(true);
+      let userData = null;
+
+      try {
+        // Cari data user di localStorage atau sessionStorage
+        const rawData = localStorage.getItem("userLogin") || sessionStorage.getItem("userLogin");
+        if (rawData) {
+          const parsed = JSON.parse(rawData);
+          // Tangkap format object user (bisa jadi di dalam properti .user atau langsung)
+          userData = parsed?.user || parsed;
+        }
+      } catch (e) { console.error("Error parsing local user data", e); }
+
+      // Jika data user ada (username wajib ada)
+      if (userData && (userData.username || userData.name)) {
+        const username = userData.username || userData.name;
+        // Fallback email/avatar jika tidak ada di localstorage
+        const email = userData.email || `${username.replace(/\s+/g, '')}@jkt48connect.local`;
+        const avatar_url = userData.avatar_url || `https://ui-avatars.com/api/?name=${username}`;
+
+        try {
+          // 1. AUTO REGISTER KE API (Sama seperti code di terminal)
+          await fetch(`https://v2.jkt48connect.com/api/chatstream/register?apikey=${API_KEY}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              username: username,
+              email: email,
+              avatar_url: avatar_url,
+            }),
+          });
+          // Kita biarkan berlanjut (mau status true/false karena bisa jadi sudah terdaftar)
+
+          // 2. AUTO LOGIN/VERIFIKASI KE SUPABASE
+          const { data: user, error } = await supabase
+            .from("dashboard_v2_users")
+            .select("id, username, avatar_url, role, bluetick, is_verified")
+            .eq("username", username.toLowerCase())
+            .single();
+
+          // Hanya set chat user jika is_verified == true
+          if (!error && user && user.is_verified) {
+            setChatUser(user);
+          } else {
+            console.log("User chat belum diverifikasi oleh admin.");
+          }
+        } catch (e) {
+          console.error("Gagal auto register/login chat", e);
+        }
+      }
+      setIsChatLoggingIn(false);
+    };
+
+    initChatUser();
+
+    // --- SETUP SUPABASE REALTIME CHANNEL ---
+    const channel = supabase.channel("live-chat", {
+      config: { broadcast: { ack: true } },
+    });
+
+    channel
+      .on("broadcast", { event: "pesan_baru" }, (response) => {
+        const payload = response.payload;
+        // Mencegah pesan duplikat akibat optimistic update
+        setChatMessages((prev) => {
+          const isExist = prev.some(msg => msg.timestamp === payload.timestamp && msg.username === payload.username);
+          if (isExist) return prev;
+          return [...prev, payload];
+        });
+      })
+      .subscribe();
+
+    channelRef.current = channel;
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -459,6 +444,11 @@ function LiveStream() {
       loadStreamData();
     }
   }, [isVerified, membershipChecked]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Scroll otomatis chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [chatMessages]);
 
   // ── UI Handlers ───────────────────────────────────────────────────────────
   const handleInputChange = (e) => {
@@ -477,6 +467,32 @@ function LiveStream() {
     setShowVerification(true);
     setStreamData(null);
     setVerificationData({ email: "", code: "" });
+  };
+
+  const handleSendMessage = async (e) => {
+    e.preventDefault();
+    if (!chatInput.trim() || !chatUser) return;
+
+    const payload = {
+      user_id: chatUser.id,
+      username: chatUser.username,
+      avatar_url: chatUser.avatar_url || "https://ui-avatars.com/api/?name=" + chatUser.username,
+      bluetick: chatUser.bluetick,
+      role: chatUser.role,
+      text_content: chatInput.trim(),
+      timestamp: new Date().toISOString(),
+    };
+
+    // Optimistic Update (Langsung tampil di UI lokal)
+    setChatMessages((prev) => [...prev, payload]);
+    setChatInput("");
+
+    // Broadcast ke Supabase Realtime
+    await channelRef.current.send({
+      type: "broadcast",
+      event: "pesan_baru",
+      payload: payload,
+    });
   };
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -608,12 +624,10 @@ function LiveStream() {
           </div>
         )}
 
-        {/* Tampilkan logout hanya untuk user yang masuk via kode (bukan membership) */}
         {!hasMonthlymember && (
           <button onClick={handleLogout} className="logout-btn">Logout</button>
         )}
 
-        {/* Badge membership untuk user yang sudah login */}
         {hasMonthlymember && (
           <div style={{
             display: "flex", alignItems: "center", gap: "6px",
@@ -626,48 +640,121 @@ function LiveStream() {
         )}
       </div>
 
-      {/* Player */}
-      <div className="player-container">
-        <MuxPlayer
-          streamType="live"
-          playbackId={streamData.playbackId}
-          metadata={{
-            video_title:    streamData.title,
-            viewer_user_id: streamData.viewerId,
-          }}
-          autoPlay
-        />
-      </div>
-
-      {/* Lineup Members */}
-      {members.length > 0 && (
-        <div className="members-section">
-          <div className="members-header">
-            <h3>Lineup Show</h3>
-            <span className="member-count">{members.length} Member</span>
+      {/* ── LAYOUT STREAM & CHAT ── */}
+      <div className="stream-layout">
+        
+        {/* KIRI: Player & Members */}
+        <div className="main-content">
+          {/* Player */}
+          <div className="player-container">
+            <MuxPlayer
+              streamType="live"
+              playbackId={streamData.playbackId}
+              metadata={{
+                video_title:    streamData.title,
+                viewer_user_id: streamData.viewerId,
+              }}
+              autoPlay
+            />
           </div>
 
-          {loadingMembers ? (
-            <div className="members-loading">
-              <div className="spinner"></div>
-              <p>Memuat lineup...</p>
-            </div>
-          ) : (
-            <div className="members-grid">
-              {members.map((member) => (
-                <div key={member.id} className="member-card">
-                  <img src={member.img} alt={member.name} />
-                  <p>{member.name}</p>
+          {/* Lineup Members */}
+          {members.length > 0 && (
+            <div className="members-section">
+              <div className="members-header">
+                <h3>Lineup Show</h3>
+                <span className="member-count">{members.length} Member</span>
+              </div>
+
+              {loadingMembers ? (
+                <div className="members-loading">
+                  <div className="spinner"></div>
+                  <p>Memuat lineup...</p>
                 </div>
-              ))}
+              ) : (
+                <div className="members-grid">
+                  {members.map((member) => (
+                    <div key={member.id} className="member-card">
+                      <img src={member.img} alt={member.name} />
+                      <p>{member.name}</p>
+                    </div>
+                  ))}
+                </div>
+              )}
             </div>
           )}
-        </div>
-      )}
 
-      {/* Footer */}
-      <div className="stream-footer">
-        <p>POWERED BY JKT48Connect</p>
+          {/* Footer */}
+          <div className="stream-footer">
+            <p>POWERED BY JKT48Connect</p>
+          </div>
+        </div>
+
+        {/* KANAN: Sidebar Live Chat */}
+        <div className="chat-sidebar">
+          <div className="chat-header">
+            <span>Live Chat</span>
+            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)" }}>
+              {chatMessages.length} Pesan
+            </span>
+          </div>
+
+          <div className="chat-messages">
+            {chatMessages.map((msg, idx) => (
+              <div key={idx} className="chat-message">
+                <img src={msg.avatar_url || "https://ui-avatars.com/api/?name=" + msg.username} alt="avatar" className="chat-avatar" />
+                <div className="chat-message-content">
+                  <div className="chat-username">
+                    {msg.role && msg.role !== "member" && (
+                      <span className="chat-role-badge">{msg.role}</span>
+                    )}
+                    {msg.username}
+                    
+                    {/* Bluetick Icon */}
+                    {msg.bluetick && (
+                      <span className="bluetick-icon" title="Verified" style={{ display: "inline-flex", marginLeft: "4px" }}>
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.998-3.918-3.998-.47 0-.92.084-1.336.25C14.818 2.415 13.51 1.5 12 1.5s-2.816.917-3.337 2.25c-.416-.165-.866-.25-1.336-.25-2.21 0-3.918 1.79-3.918 4 0 .495.084.965.238 1.4-1.273.65-2.148 2.02-2.148 3.6 0 1.46.726 2.75 1.83 3.444-.06.315-.09.64-.09.966 0 2.21 1.71 3.998 3.918 3.998.53 0 1.04-.1 1.51-.282.825 1.155 2.15 1.924 3.63 1.924s2.805-.767 3.63-1.924c.47.182.98.282 1.51.282 2.21 0 3.918-1.79 3.918-4 0-.325-.03-.65-.09-.966 1.105-.694 1.83-1.984 1.83-3.444z" fill="#1DA1F2"/>
+                          <path d="M10.42 16.273L6.46 12.31l1.41-1.414 2.55 2.548 6.42-6.42 1.414 1.415-7.834 7.834z" fill="white"/>
+                        </svg>
+                      </span>
+                    )}
+                  </div>
+                  <div className="chat-text">{msg.text_content}</div>
+                </div>
+              </div>
+            ))}
+            <div ref={chatEndRef} />
+          </div>
+
+          <div className="chat-input-container">
+            {isChatLoggingIn ? (
+              <div className="chat-disabled-overlay">Memuat info akun...</div>
+            ) : chatUser ? (
+              <form onSubmit={handleSendMessage} className="chat-input-form">
+                <input
+                  type="text"
+                  placeholder={`Kirim sebagai ${chatUser.username}...`}
+                  value={chatInput}
+                  onChange={(e) => setChatInput(e.target.value)}
+                  className="chat-input"
+                  maxLength={200}
+                />
+                <button type="submit" className="chat-send-btn" disabled={!chatInput.trim()}>
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="22" y1="2" x2="11" y2="13"></line>
+                    <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
+                  </svg>
+                </button>
+              </form>
+            ) : (
+              <div className="chat-disabled-overlay">
+                Hanya bisa melihat chat. <br/>
+                <a href="/login" onClick={(e) => { e.preventDefault(); navigate('/login'); }}>Login JKT48Connect</a> untuk ikut komen.
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );
