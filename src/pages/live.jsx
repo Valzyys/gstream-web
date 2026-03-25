@@ -398,60 +398,89 @@ function LiveStream() {
     init();
 
     // --- AUTO REGISTER & LOGIN CHAT DARI LOCALSTORAGE ---
-    const initChatUser = async () => {
-      setIsChatLoggingIn(true);
-      let userData = null;
+   const initChatUser = async () => {
+  setIsChatLoggingIn(true);
+  let userData = null;
 
-      try {
-        // Cari data user di localStorage atau sessionStorage
-        const rawData = localStorage.getItem("userLogin") || sessionStorage.getItem("userLogin");
-        if (rawData) {
-          const parsed = JSON.parse(rawData);
-          // Tangkap format object user (bisa jadi di dalam properti .user atau langsung)
-          userData = parsed?.user || parsed;
-        }
-      } catch (e) { console.error("Error parsing local user data", e); }
+  try {
+    // ✅ Ambil dari sessionStorage DULU (sesuai ProfilePage),
+    // fallback ke localStorage jika tidak ada
+    const rawData = 
+      sessionStorage.getItem("userLogin") || 
+      localStorage.getItem("userLogin");
 
-      // Jika data user ada (username wajib ada)
-      if (userData && (userData.username || userData.name)) {
-        const username = userData.username || userData.name;
-        // Fallback email/avatar jika tidak ada di localstorage
-        const email = userData.email || `${username.replace(/\s+/g, '')}@jkt48connect.local`;
-        const avatar_url = userData.avatar_url || `https://ui-avatars.com/api/?name=${username}`;
+    if (rawData) {
+      const parsed = JSON.parse(rawData);
+
+      // ✅ Ambil data profile lengkap dari API jika session valid
+      if (parsed?.isLoggedIn && parsed?.token && parsed?.user?.user_id) {
+        const uid   = parsed.user.user_id;
+        const token = parsed.token;
 
         try {
-          // 1. AUTO REGISTER KE API (Sama seperti code di terminal)
-          await fetch(`https://v2.jkt48connect.com/api/chatstream/register?apikey=${API_KEY}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              username: username,
-              email: email,
-              avatar_url: avatar_url,
-            }),
-          });
-          // Kita biarkan berlanjut (mau status true/false karena bisa jadi sudah terdaftar)
+          const res  = await fetch(
+            `${API_BASE}/profile/${uid}?apikey=${API_KEY}`,
+            { headers: { Authorization: `Bearer ${token}` } }
+          );
+          const profileData = await res.json();
 
-          // 2. AUTO LOGIN/VERIFIKASI KE SUPABASE
-          const { data: user, error } = await supabase
-            .from("dashboard_v2_users")
-            .select("id, username, avatar_url, role, bluetick, is_verified")
-            .eq("username", username.toLowerCase())
-            .single();
-
-          // Hanya set chat user jika is_verified == true
-          if (!error && user && user.is_verified) {
-            setChatUser(user);
+          // Gunakan data dari API profile (paling lengkap)
+          if (profileData.status && profileData.data) {
+            userData = profileData.data;
           } else {
-            console.log("User chat belum diverifikasi oleh admin.");
+            // Fallback ke data di session
+            userData = parsed.user;
           }
-        } catch (e) {
-          console.error("Gagal auto register/login chat", e);
+        } catch {
+          // Fallback ke data session jika API gagal
+          userData = parsed.user;
         }
+      } else {
+        userData = parsed?.user || parsed;
       }
-      setIsChatLoggingIn(false);
-    };
+    }
+  } catch (e) {
+    console.error("Error parsing user session", e);
+  }
 
+  // Jika data user ada (username wajib ada)
+  if (userData && (userData.username || userData.full_name)) {
+    // ✅ Gunakan username atau full_name dari ProfilePage
+    const username   = userData.username || userData.full_name;
+    const email      = userData.email || `${username.replace(/\s+/g, '').toLowerCase()}@jkt48connect.local`;
+    const avatar_url = userData.avatar || `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=7b1c1c&color=fff`;
+
+    try {
+      // 1. AUTO REGISTER ke API chatstream
+      await fetch(`${API_BASE}/chatstream/register?apikey=${API_KEY}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          username:   username.toLowerCase(),
+          email:      email,
+          avatar_url: avatar_url,
+        }),
+      });
+
+      // 2. Cek user di Supabase (by username)
+      const { data: user, error } = await supabase
+        .from("dashboard_v2_users")
+        .select("id, username, avatar_url, role, bluetick, is_verified")
+        .eq("username", username.toLowerCase())
+        .single();
+
+      if (!error && user && user.is_verified) {
+        setChatUser(user);
+      } else {
+        console.log("User chat belum diverifikasi oleh admin.");
+      }
+    } catch (e) {
+      console.error("Gagal auto register/login chat", e);
+    }
+  }
+
+  setIsChatLoggingIn(false);
+};
     initChatUser();
 
     // --- SETUP SUPABASE REALTIME CHANNEL ---
