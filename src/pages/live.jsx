@@ -558,9 +558,9 @@ function LiveStream() {
     initChatUser();
 
     // --- SETUP SUPABASE REALTIME CHANNEL ---
-    const channel = supabase.channel("live-chat", {
-      config: { broadcast: { ack: true } },
-    });
+    const channel = supabase.channel(`chat-${playbackId}`, {
+  config: { broadcast: { ack: true } },
+});
 
     channel
       .on("broadcast", { event: "pesan_baru" }, (response) => {
