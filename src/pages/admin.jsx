@@ -7,12 +7,10 @@ const ADMIN_PASS = "010907";
 const API_BASE   = "https://v2.jkt48connect.com/api/jkt48";
 const API_KEY    = "JKTCONNECT";
 
+const STREAM_POLL_INTERVAL = 25_000; // 25 detik
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/**
- * Converts a character-map JSON object {"0":"#","1":"E",...} into a plain string.
- * Mirrors the Node.js charmap_to_string helper used on the backend.
- */
 function charmapToString(obj) {
   return Object.keys(obj)
     .filter((k) => !isNaN(k))
@@ -21,17 +19,12 @@ function charmapToString(obj) {
     .join("");
 }
 
-/** Returns true when every own key of obj is a numeric string */
 function isCharmap(obj) {
   if (!obj || typeof obj !== "object" || Array.isArray(obj)) return false;
   const keys = Object.keys(obj);
   return keys.length > 0 && keys.every((k) => !isNaN(k));
 }
 
-/**
- * Parse an M3U8 master-playlist string into { session, streams }.
- * Produces the same structure as the structured JSON output (doc 4 / doc 7).
- */
 function parseM3U8(m3u8) {
   const lines  = m3u8.split("\n").map((l) => l.trim()).filter(Boolean);
   const session = {};
@@ -65,7 +58,6 @@ function parseM3U8(m3u8) {
       current["FRAME-RATE"]  = get(/FRAME-RATE=([\d.]+)/);
       continue;
     }
-    // URL line that follows #EXT-X-STREAM-INF
     if (!line.startsWith("#") && current && current.BANDWIDTH) {
       current.url = line;
       streams.push(current);
@@ -75,20 +67,11 @@ function parseM3U8(m3u8) {
   return { session, streams };
 }
 
-/**
- * Resolve a raw API response from /live/show into { session, streams, raw }.
- * Handles three cases:
- *   1. Already-structured JSON  → { session, streams }
- *   2. Charmap JSON             → decode → parse M3U8 or inner JSON
- *   3. Normal flat JSON         → extract stream_url / playback_url
- */
 function resolveStreamResponse(data) {
-  // ── Case 1: already structured ────────────────────────────────────────────
   if (data && Array.isArray(data.streams) && data.streams.length) {
     return { session: data.session || {}, streams: data.streams, raw: data };
   }
 
-  // ── Case 2: charmap ────────────────────────────────────────────────────────
   if (isCharmap(data)) {
     const str = charmapToString(data).trim();
 
@@ -97,16 +80,14 @@ function resolveStreamResponse(data) {
       return { ...parsed, raw: { success: true, ...parsed } };
     }
 
-    // Maybe the charmap encodes a JSON string
     try {
       const inner = JSON.parse(str);
-      return resolveStreamResponse(inner); // recurse once
+      return resolveStreamResponse(inner);
     } catch {
       return { session: {}, streams: [], raw: { raw_string: str } };
     }
   }
 
-  // ── Case 3: flat JSON with a stream URL ────────────────────────────────────
   const flatUrl =
     data?.stream_url         ||
     data?.data?.stream_url   ||
@@ -126,20 +107,17 @@ function resolveStreamResponse(data) {
   return { session: {}, streams: [], raw: data };
 }
 
-/** Normalise a timestamp (seconds or ms) to a JS Date */
 function tsToDate(ts) {
   if (!ts) return null;
   const n = Number(ts);
   return new Date(n < 1e12 ? n * 1000 : n);
 }
 
-/** Return today's date string in WIB (UTC+7) as "YYYY-MM-DD" */
 function todayWIB() {
   const now = new Date(Date.now() + 7 * 3600 * 1000);
   return now.toISOString().slice(0, 10);
 }
 
-/** Check whether a slug's embedded date matches today WIB. */
 function slugMatchesToday(slug) {
   if (!slug) return false;
   const today = todayWIB();
@@ -148,7 +126,6 @@ function slugMatchesToday(slug) {
   return match.some((d) => d === today);
 }
 
-/** Fallback: compare scheduled_at / live_at date against today WIB */
 function itemMatchesToday(item) {
   if (slugMatchesToday(item.slug)) return true;
   const candidates = [item.scheduled_at, item.live_at, item.end_at].filter(Boolean);
@@ -161,7 +138,7 @@ function itemMatchesToday(item) {
   });
 }
 
-// ─── HLS Player (native or hls.js fallback) ───────────────────────────────────
+// ─── HLS Player ───────────────────────────────────────────────────────────────
 function HLSPlayer({ src, title }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
@@ -178,14 +155,12 @@ function HLSPlayer({ src, title }) {
     cleanup();
     setStatus("loading");
 
-    // Native HLS (Safari / iOS)
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = src;
       video.play().then(() => setStatus("playing")).catch(() => setStatus("error"));
       return cleanup;
     }
 
-    // hls.js
     const loadHls = async () => {
       try {
         const Hls = (await import("hls.js")).default;
@@ -257,26 +232,26 @@ function HLSPlayer({ src, title }) {
 export default function AdminLive() {
   const navigate = useNavigate();
 
-  // Auth
   const [authed,        setAuthed]        = useState(false);
   const [loginForm,     setLoginForm]     = useState({ username: "", password: "" });
   const [loginError,    setLoginError]    = useState("");
   const [loginLoading,  setLoginLoading]  = useState(false);
 
-  // Shows list
   const [shows,         setShows]         = useState([]);
   const [showsLoading,  setShowsLoading]  = useState(false);
   const [showsError,    setShowsError]    = useState("");
 
-  // Selected show
   const [selectedSlug,  setSelectedSlug]  = useState(null);
   const [selectedShow,  setSelectedShow]  = useState(null);
 
-  // Stream
   const [streamData,    setStreamData]    = useState(null);
   const [streamLoading, setStreamLoading] = useState(false);
   const [streamError,   setStreamError]   = useState("");
-  const [activeStream,  setActiveStream]  = useState(null); // currently playing stream entry
+  const [activeStream,  setActiveStream]  = useState(null);
+
+  // ── Countdown state untuk progress bar polling ────────────────────────────
+  const [pollCountdown, setPollCountdown] = useState(STREAM_POLL_INTERVAL);
+  const countdownRef = useRef(null);
 
   // ── Restore session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -312,46 +287,73 @@ export default function AdminLive() {
   }, [authed, fetchShows]);
 
   // ── Fetch stream when slug changes ───────────────────────────────────────
+  const fetchStream = useCallback(async (slug) => {
+    if (!slug) return;
+    setStreamLoading(true);
+    setStreamError("");
+    setStreamData(null);
+    setActiveStream(null);
+    try {
+      const url     = `${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`;
+      const res     = await fetch(url);
+      const raw     = await res.json();
+
+      const resolved = resolveStreamResponse(raw);
+
+      if (!resolved.streams.length) {
+        setStreamData({ streams: [], session: {}, raw: resolved.raw });
+        return;
+      }
+
+      const sorted = [...resolved.streams].sort(
+        (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+      );
+      const defaultStream = sorted[0];
+
+      setStreamData({
+        streams: resolved.streams,
+        session: resolved.session,
+        raw:     resolved.raw,
+      });
+      setActiveStream(defaultStream);
+    } catch (e) {
+      setStreamError(e.message);
+    } finally {
+      setStreamLoading(false);
+    }
+  }, []);
+
+  // ── Initial fetch saat slug berubah ──────────────────────────────────────
   useEffect(() => {
     if (!selectedSlug) return;
-    const load = async () => {
-      setStreamLoading(true);
-      setStreamError("");
-      setStreamData(null);
-      setActiveStream(null);
-      try {
-        const url     = `${API_BASE}/live/show?slug=${encodeURIComponent(selectedSlug)}&apikey=${API_KEY}`;
-        const res     = await fetch(url);
-        const raw     = await res.json();
+    fetchStream(selectedSlug);
+  }, [selectedSlug, fetchStream]);
 
-        // ── Decode charmap / M3U8 / flat JSON ──────────────────────────────
-        const resolved = resolveStreamResponse(raw);
+  // ── Polling stream slug setiap 25 detik ──────────────────────────────────
+  useEffect(() => {
+    if (!selectedSlug) return;
 
-        if (!resolved.streams.length) {
-          setStreamData({ streams: [], session: {}, raw: resolved.raw });
-          return;
-        }
+    // Reset countdown
+    setPollCountdown(STREAM_POLL_INTERVAL);
 
-        // Default: pick highest quality by BANDWIDTH (largest number = best)
-        const sorted = [...resolved.streams].sort(
-          (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
-        );
-        const defaultStream = sorted[0];
+    // Countdown tick setiap 1 detik
+    countdownRef.current = setInterval(() => {
+      setPollCountdown((prev) => {
+        if (prev <= 1000) return STREAM_POLL_INTERVAL;
+        return prev - 1000;
+      });
+    }, 1000);
 
-        setStreamData({
-          streams: resolved.streams, // keep original order for display
-          session: resolved.session,
-          raw:     resolved.raw,
-        });
-        setActiveStream(defaultStream); // set active stream separately
-      } catch (e) {
-        setStreamError(e.message);
-      } finally {
-        setStreamLoading(false);
-      }
+    // Polling fetch setiap 25 detik
+    const pollIv = setInterval(() => {
+      fetchStream(selectedSlug);
+    }, STREAM_POLL_INTERVAL);
+
+    return () => {
+      clearInterval(countdownRef.current);
+      clearInterval(pollIv);
     };
-    load();
-  }, [selectedSlug]);
+  }, [selectedSlug, fetchStream]);
 
   // ── Login handler ─────────────────────────────────────────────────────────
   const handleLogin = (e) => {
@@ -432,6 +434,9 @@ export default function AdminLive() {
   // ─────────────────────────────────────────────────────────────────────────
   // DASHBOARD
   // ─────────────────────────────────────────────────────────────────────────
+  const countdownSec = Math.ceil(pollCountdown / 1000);
+  const countdownPct = ((STREAM_POLL_INTERVAL - pollCountdown) / STREAM_POLL_INTERVAL) * 100;
+
   return (
     <>
       <style>{globalStyles}</style>
@@ -554,6 +559,21 @@ export default function AdminLive() {
                   </div>
                 )}
 
+                {/* ── Polling countdown bar ── */}
+                {selectedSlug && (
+                  <div className="al-poll-bar-wrap">
+                    <div className="al-poll-bar-track">
+                      <div
+                        className="al-poll-bar-fill"
+                        style={{ width: `${countdownPct}%` }}
+                      />
+                    </div>
+                    <span className="al-poll-label">
+                      Refresh stream dalam {countdownSec}d
+                    </span>
+                  </div>
+                )}
+
                 {/* Player area */}
                 <div className="al-player-wrap">
                   {streamLoading && (
@@ -568,11 +588,7 @@ export default function AdminLive() {
                       <p>{streamError}</p>
                       <button
                         className="al-btn-primary sm"
-                        onClick={() => {
-                          const slug = selectedSlug;
-                          setSelectedSlug(null);
-                          setTimeout(() => setSelectedSlug(slug), 50);
-                        }}
+                        onClick={() => fetchStream(selectedSlug)}
                       >
                         Coba Lagi
                       </button>
@@ -597,7 +613,7 @@ export default function AdminLive() {
                   )}
                 </div>
 
-                {/* Quality selector — click to switch stream source */}
+                {/* Quality selector */}
                 {streamData?.streams?.length > 0 && (
                   <div className="al-quality-row">
                     <span className="al-quality-label">Kualitas:</span>
@@ -620,7 +636,7 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                {/* Session info (broadcast id, stream time, etc.) */}
+                {/* Session info */}
                 {streamData?.session && Object.keys(streamData.session).length > 0 && (
                   <div className="al-session-row">
                     {["BROADCAST-ID", "VIDEO-SESSION-ID", "STREAM-TIME", "CLUSTER", "USER-COUNTRY"].map((key) =>
@@ -776,6 +792,22 @@ const globalStyles = `
   }
   .al-spin.sm  { width: 13px; height: 13px; }
   .al-spin.xl  { width: 40px; height: 40px; border-width: 3px; border-top-color: var(--red); border-color: var(--red-dim); }
+
+  /* ── POLL BAR ── */
+  .al-poll-bar-wrap {
+    display: flex; align-items: center; gap: 10px;
+  }
+  .al-poll-bar-track {
+    flex: 1; height: 2px; background: var(--bg3); border-radius: 2px; overflow: hidden;
+  }
+  .al-poll-bar-fill {
+    height: 100%; background: var(--red); border-radius: 2px;
+    transition: width 1s linear;
+  }
+  .al-poll-label {
+    font-size: 10px; color: var(--txt3); font-family: var(--mono);
+    white-space: nowrap; flex-shrink: 0;
+  }
 
   /* ── DASHBOARD ── */
   .al-dashboard {
