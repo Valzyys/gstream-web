@@ -2,12 +2,11 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const ADMIN_USER = "JKT48Connect";
-const ADMIN_PASS = "010907";
-const API_BASE   = "https://v2.jkt48connect.com/api/jkt48";
-const API_KEY    = "JKTCONNECT";
-
-const STREAM_POLL_INTERVAL = 25_000; // 25 detik
+const ADMIN_USER        = "JKT48Connect";
+const ADMIN_PASS        = "010907";
+const API_BASE          = "https://v2.jkt48connect.com/api/jkt48";
+const API_KEY           = "JKTCONNECT";
+const PLAYLIST_POLL_MS  = 15_000; // refresh playlist setiap 15 detik
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -26,11 +25,10 @@ function isCharmap(obj) {
 }
 
 function parseM3U8(m3u8) {
-  const lines  = m3u8.split("\n").map((l) => l.trim()).filter(Boolean);
+  const lines   = m3u8.split("\n").map((l) => l.trim()).filter(Boolean);
   const session = {};
   const streams = [];
-  let current  = null;
-
+  let current   = null;
   for (const line of lines) {
     if (line.startsWith("#EXT-X-SESSION-DATA:")) {
       const id  = (line.match(/DATA-ID="([^"]+)"/)  || [])[1];
@@ -51,11 +49,11 @@ function parseM3U8(m3u8) {
     if (line.startsWith("#EXT-X-STREAM-INF:")) {
       if (!current) current = {};
       const get = (re) => (line.match(re) || [])[1];
-      current.BANDWIDTH      = get(/BANDWIDTH=(\d+)/);
-      current.RESOLUTION     = get(/RESOLUTION=([^\s,]+)/);
-      current.CODECS         = get(/CODECS="([^"]+)"/);
-      current.VIDEO          = get(/VIDEO="([^"]+)"/);
-      current["FRAME-RATE"]  = get(/FRAME-RATE=([\d.]+)/);
+      current.BANDWIDTH     = get(/BANDWIDTH=(\d+)/);
+      current.RESOLUTION    = get(/RESOLUTION=([^\s,]+)/);
+      current.CODECS        = get(/CODECS="([^"]+)"/);
+      current.VIDEO         = get(/VIDEO="([^"]+)"/);
+      current["FRAME-RATE"] = get(/FRAME-RATE=([\d.]+)/);
       continue;
     }
     if (!line.startsWith("#") && current && current.BANDWIDTH) {
@@ -68,42 +66,23 @@ function parseM3U8(m3u8) {
 }
 
 function resolveStreamResponse(data) {
-  if (data && Array.isArray(data.streams) && data.streams.length) {
+  if (data && Array.isArray(data.streams) && data.streams.length)
     return { session: data.session || {}, streams: data.streams, raw: data };
-  }
-
   if (isCharmap(data)) {
     const str = charmapToString(data).trim();
-
     if (str.startsWith("#EXTM3U")) {
       const parsed = parseM3U8(str);
       return { ...parsed, raw: { success: true, ...parsed } };
     }
-
-    try {
-      const inner = JSON.parse(str);
-      return resolveStreamResponse(inner);
-    } catch {
-      return { session: {}, streams: [], raw: { raw_string: str } };
-    }
+    try { return resolveStreamResponse(JSON.parse(str)); }
+    catch { return { session: {}, streams: [], raw: { raw_string: str } }; }
   }
-
   const flatUrl =
-    data?.stream_url         ||
-    data?.data?.stream_url   ||
-    data?.playback_url       ||
-    data?.data?.playback_url ||
-    data?.url                ||
-    null;
-
-  if (flatUrl) {
-    return {
-      session: {},
-      streams: [{ NAME: "default", BANDWIDTH: "0", url: flatUrl }],
-      raw: data,
-    };
-  }
-
+    data?.stream_url || data?.data?.stream_url ||
+    data?.playback_url || data?.data?.playback_url ||
+    data?.url || null;
+  if (flatUrl)
+    return { session: {}, streams: [{ NAME: "default", BANDWIDTH: "0", url: flatUrl }], raw: data };
   return { session: {}, streams: [], raw: data };
 }
 
@@ -138,56 +117,103 @@ function itemMatchesToday(item) {
   });
 }
 
-// ─── HLS Player ───────────────────────────────────────────────────────────────
-function HLSPlayer({ src, title }) {
+// ─── HLS Player dengan silent playlist refresh ────────────────────────────────
+//
+// Strategi:
+//   - key={selectedSlug} → player hanya restart kalau show berubah, bukan karena URL berubah
+//   - pollUrl() dipanggil setiap 15 detik di dalam player
+//   - Kalau URL SAMA  → hls.loadSource() ulang → hls.js fetch segmen terbaru, playback lanjut
+//   - Kalau URL BEDA  → simpan currentTime → init ulang hls dengan URL baru → resume
+//   - Tidak ada setState loading/error saat polling → UI tidak berubah sama sekali
+//
+function HLSPlayer({ src, title, pollUrl }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
+  const pollRef  = useRef(null);
+  const srcRef   = useRef(src); // track URL aktif tanpa re-render
   const [status, setStatus] = useState("loading");
 
-  useEffect(() => {
-    if (!src || !videoRef.current) return;
-    const video = videoRef.current;
+  // ── Init hls.js ────────────────────────────────────────────────────────────
+  const initHls = useCallback(async (url, video, resumeTime = 0) => {
+    if (!url || !video) return;
 
-    const cleanup = () => {
-      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-    };
+    if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    cleanup();
-    setStatus("loading");
-
+    // Native HLS (Safari/iOS)
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      video.src = src;
+      video.src = url;
+      if (resumeTime > 0) video.currentTime = resumeTime;
       video.play().then(() => setStatus("playing")).catch(() => setStatus("error"));
-      return cleanup;
+      return;
     }
 
-    const loadHls = async () => {
-      try {
-        const Hls = (await import("hls.js")).default;
-        if (!Hls.isSupported()) { setStatus("error"); return; }
+    try {
+      const Hls = (await import("hls.js")).default;
+      if (!Hls.isSupported()) { setStatus("error"); return; }
 
-        const hls = new Hls({
-          enableWorker: true,
-          lowLatencyMode: true,
-          liveSyncDurationCount: 3,
-        });
-        hlsRef.current = hls;
+      const hls = new Hls({
+        enableWorker:          true,
+        lowLatencyMode:        true,
+        liveSyncDurationCount: 3,
+        liveDurationInfinity:  true,
+      });
+      hlsRef.current = hls;
 
-        hls.on(Hls.Events.ERROR, (_, data) => {
-          if (data.fatal) setStatus("error");
-        });
-        hls.on(Hls.Events.MANIFEST_PARSED, () => {
-          video.play().then(() => setStatus("playing")).catch(() => {});
-        });
+      hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) setStatus("error"); });
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        if (resumeTime > 0) video.currentTime = resumeTime;
+        video.play().then(() => setStatus("playing")).catch(() => {});
+      });
 
-        hls.loadSource(src);
-        hls.attachMedia(video);
-      } catch { setStatus("error"); }
+      hls.loadSource(url);
+      hls.attachMedia(video);
+    } catch { setStatus("error"); }
+  }, []);
+
+  // ── Mount: init player pertama kali ────────────────────────────────────────
+  useEffect(() => {
+    if (!src || !videoRef.current) return;
+    srcRef.current = src;
+    setStatus("loading");
+    initHls(src, videoRef.current, 0);
+
+    return () => {
+      clearInterval(pollRef.current);
+      if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
     };
+  }, [src, initHls]);
 
-    loadHls();
-    return cleanup;
-  }, [src]);
+  // ── Polling setiap 15 detik — SILENT, tidak ada setState UI ───────────────
+  useEffect(() => {
+    if (!pollUrl || !src) return;
+
+    clearInterval(pollRef.current);
+    pollRef.current = setInterval(async () => {
+      const video = videoRef.current;
+      const hls   = hlsRef.current;
+      if (!video || !hls) return;
+
+      try {
+        const newUrl = await pollUrl();
+        if (!newUrl) return;
+
+        if (newUrl === srcRef.current) {
+          // URL sama → minta hls.js reload playlist → ambil segmen terbaru
+          // Playback tidak terputus, ini seperti manual tick ke hls internal scheduler
+          hls.loadSource(newUrl);
+        } else {
+          // URL berubah → simpan posisi → init ulang → resume
+          const resumeTime = video.currentTime || 0;
+          srcRef.current = newUrl;
+          await initHls(newUrl, video, resumeTime);
+        }
+      } catch (_) {
+        // Gagal → abaikan, coba lagi 15 detik lagi
+      }
+    }, PLAYLIST_POLL_MS);
+
+    return () => clearInterval(pollRef.current);
+  }, [src, pollUrl, initHls]);
 
   return (
     <div style={{ position: "relative", width: "100%", background: "#000", borderRadius: "12px", overflow: "hidden" }}>
@@ -219,7 +245,6 @@ function HLSPlayer({ src, title }) {
       <video
         ref={videoRef}
         controls
-        muted={false}
         style={{ width: "100%", display: "block", maxHeight: "56.25vw", background: "#000" }}
         playsInline
         title={title}
@@ -249,9 +274,9 @@ export default function AdminLive() {
   const [streamError,   setStreamError]   = useState("");
   const [activeStream,  setActiveStream]  = useState(null);
 
-  // ── Countdown state untuk progress bar polling ────────────────────────────
-  const [pollCountdown, setPollCountdown] = useState(STREAM_POLL_INTERVAL);
-  const countdownRef = useRef(null);
+  // Ref agar pollUrl bisa baca state terbaru tanpa closure stale
+  const activeStreamRef  = useRef(null);
+  const selectedSlugRef  = useRef(null);
 
   // ── Restore session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -267,10 +292,8 @@ export default function AdminLive() {
       const res  = await fetch(`${API_BASE}/idnplus?apikey=${API_KEY}`);
       const json = await res.json();
       const list = json.data || [];
-
       const todayItems = list.filter(itemMatchesToday);
       setShows(todayItems.length ? todayItems : list);
-
       if (todayItems.length) {
         setSelectedSlug(todayItems[0].slug);
         setSelectedShow(todayItems[0]);
@@ -282,80 +305,82 @@ export default function AdminLive() {
     }
   }, []);
 
-  useEffect(() => {
-    if (authed) fetchShows();
-  }, [authed, fetchShows]);
+  useEffect(() => { if (authed) fetchShows(); }, [authed, fetchShows]);
 
-  // ── Fetch stream when slug changes ───────────────────────────────────────
-  const fetchStream = useCallback(async (slug) => {
-    if (!slug) return;
-    setStreamLoading(true);
-    setStreamError("");
-    setStreamData(null);
-    setActiveStream(null);
-    try {
-      const url     = `${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`;
-      const res     = await fetch(url);
-      const raw     = await res.json();
-
-      const resolved = resolveStreamResponse(raw);
-
-      if (!resolved.streams.length) {
-        setStreamData({ streams: [], session: {}, raw: resolved.raw });
-        return;
-      }
-
-      const sorted = [...resolved.streams].sort(
-        (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
-      );
-      const defaultStream = sorted[0];
-
-      setStreamData({
-        streams: resolved.streams,
-        session: resolved.session,
-        raw:     resolved.raw,
-      });
-      setActiveStream(defaultStream);
-    } catch (e) {
-      setStreamError(e.message);
-    } finally {
-      setStreamLoading(false);
-    }
+  // ── Fetch stream dari API ─────────────────────────────────────────────────
+  const fetchStreamFromApi = useCallback(async (slug) => {
+    const res      = await fetch(`${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`);
+    const raw      = await res.json();
+    const resolved = resolveStreamResponse(raw);
+    if (!resolved.streams.length) return null;
+    const sorted = [...resolved.streams].sort(
+      (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+    );
+    return { streams: resolved.streams, session: resolved.session, sorted };
   }, []);
 
-  // ── Initial fetch saat slug berubah ──────────────────────────────────────
+  // ── pollUrl: dipanggil HLSPlayer setiap 15 detik ─────────────────────────
+  // Mengembalikan URL resolusi aktif terbaru dari API
+  // Tidak ada setState loading → tidak ada UI yang berubah
+  const pollUrl = useCallback(async () => {
+    const slug = selectedSlugRef.current;
+    if (!slug) return null;
+
+    const result = await fetchStreamFromApi(slug);
+    if (!result) return null;
+
+    // Cari resolusi yang sama dengan yang sedang ditonton
+    const currentName = activeStreamRef.current?.NAME;
+    const match = result.streams.find((s) => s.NAME === currentName);
+    const target = match || result.sorted[0];
+
+    // Update daftar kualitas di UI secara silent (tidak menyentuh player)
+    setStreamData({ streams: result.streams, session: result.session });
+
+    return target?.url ?? null;
+  }, [fetchStreamFromApi]);
+
+  // ── Initial load saat slug berubah ───────────────────────────────────────
   useEffect(() => {
     if (!selectedSlug) return;
-    fetchStream(selectedSlug);
-  }, [selectedSlug, fetchStream]);
+    selectedSlugRef.current  = selectedSlug;
+    activeStreamRef.current  = null;
 
-  // ── Polling stream slug setiap 25 detik ──────────────────────────────────
-  useEffect(() => {
-    if (!selectedSlug) return;
+    let cancelled = false;
 
-    // Reset countdown
-    setPollCountdown(STREAM_POLL_INTERVAL);
+    const load = async () => {
+      setStreamLoading(true);
+      setStreamError("");
+      setStreamData(null);
+      setActiveStream(null);
 
-    // Countdown tick setiap 1 detik
-    countdownRef.current = setInterval(() => {
-      setPollCountdown((prev) => {
-        if (prev <= 1000) return STREAM_POLL_INTERVAL;
-        return prev - 1000;
-      });
-    }, 1000);
+      try {
+        const result = await fetchStreamFromApi(selectedSlug);
+        if (cancelled) return;
+        if (!result) { setStreamError("Stream URL tidak tersedia."); return; }
 
-    // Polling fetch setiap 25 detik
-    const pollIv = setInterval(() => {
-      fetchStream(selectedSlug);
-    }, STREAM_POLL_INTERVAL);
-
-    return () => {
-      clearInterval(countdownRef.current);
-      clearInterval(pollIv);
+        const best = result.sorted[0];
+        activeStreamRef.current = best;
+        setStreamData({ streams: result.streams, session: result.session });
+        setActiveStream(best);
+      } catch (e) {
+        if (!cancelled) setStreamError(e.message);
+      } finally {
+        if (!cancelled) setStreamLoading(false);
+      }
     };
-  }, [selectedSlug, fetchStream]);
 
-  // ── Login handler ─────────────────────────────────────────────────────────
+    load();
+    return () => { cancelled = true; };
+  }, [selectedSlug, fetchStreamFromApi]);
+
+  // ── Pilih resolusi manual ─────────────────────────────────────────────────
+  const handlePickQuality = (stream) => {
+    activeStreamRef.current = stream;
+    setActiveStream(stream);
+  };
+
+  // ── Login / Logout ────────────────────────────────────────────────────────
   const handleLogin = (e) => {
     e.preventDefault();
     setLoginError("");
@@ -377,6 +402,8 @@ export default function AdminLive() {
     setShows([]);
     setStreamData(null);
     setSelectedSlug(null);
+    selectedSlugRef.current = null;
+    activeStreamRef.current = null;
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -394,7 +421,6 @@ export default function AdminLive() {
               <span className="al-logo-text">ADMIN<em>LIVE</em></span>
             </div>
             <p className="al-login-sub">JKT48Connect Internal Panel</p>
-
             <form onSubmit={handleLogin} className="al-form">
               <div className="al-field">
                 <label>Username</label>
@@ -418,9 +444,7 @@ export default function AdminLive() {
                   required
                 />
               </div>
-
               {loginError && <div className="al-error">{loginError}</div>}
-
               <button type="submit" className="al-btn-primary" disabled={loginLoading}>
                 {loginLoading ? <span className="al-spin" /> : "→ MASUK"}
               </button>
@@ -434,16 +458,12 @@ export default function AdminLive() {
   // ─────────────────────────────────────────────────────────────────────────
   // DASHBOARD
   // ─────────────────────────────────────────────────────────────────────────
-  const countdownSec = Math.ceil(pollCountdown / 1000);
-  const countdownPct = ((STREAM_POLL_INTERVAL - pollCountdown) / STREAM_POLL_INTERVAL) * 100;
-
   return (
     <>
       <style>{globalStyles}</style>
       <div className="al-dashboard">
         <div className="al-noise" />
 
-        {/* ── Top bar ── */}
         <header className="al-header">
           <div className="al-header-left">
             <span className="al-logo-icon sm">⬡</span>
@@ -458,22 +478,14 @@ export default function AdminLive() {
         </header>
 
         <div className="al-content">
-          {/* ── Left: Show picker ── */}
           <aside className="al-sidebar">
             <div className="al-sidebar-head">
               <h2>Show Hari Ini</h2>
-              <button
-                className="al-btn-ghost sm"
-                onClick={fetchShows}
-                disabled={showsLoading}
-                title="Refresh"
-              >
+              <button className="al-btn-ghost sm" onClick={fetchShows} disabled={showsLoading} title="Refresh">
                 {showsLoading ? <span className="al-spin sm" /> : "↻"}
               </button>
             </div>
-
             {showsError && <div className="al-error">{showsError}</div>}
-
             {showsLoading && !shows.length && (
               <div className="al-placeholder">
                 {[1, 2, 3].map((i) => (
@@ -481,11 +493,9 @@ export default function AdminLive() {
                 ))}
               </div>
             )}
-
             {!showsLoading && !shows.length && !showsError && (
               <div className="al-empty">Tidak ada show ditemukan untuk hari ini.</div>
             )}
-
             <div className="al-show-list">
               {shows.map((item) => {
                 const isActive  = item.slug === selectedSlug;
@@ -494,7 +504,6 @@ export default function AdminLive() {
                   ? new Date(schedDate.getTime() + 7 * 3600 * 1000)
                       .toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
                   : "—";
-
                 return (
                   <button
                     key={item.slug}
@@ -511,11 +520,7 @@ export default function AdminLive() {
                       <span className="al-show-title">{item.title}</span>
                       <span className="al-show-meta">
                         <span className={`al-dot ${item.status}`} />
-                        {item.status === "live"
-                          ? "LIVE"
-                          : item.status === "scheduled"
-                          ? `⏰ ${timeStr}`
-                          : item.status}
+                        {item.status === "live" ? "LIVE" : item.status === "scheduled" ? `⏰ ${timeStr}` : item.status}
                       </span>
                       <span className="al-show-slug">{item.slug}</span>
                     </div>
@@ -526,7 +531,6 @@ export default function AdminLive() {
             </div>
           </aside>
 
-          {/* ── Right: Player ── */}
           <main className="al-main">
             {!selectedSlug ? (
               <div className="al-no-select">
@@ -535,7 +539,6 @@ export default function AdminLive() {
               </div>
             ) : (
               <>
-                {/* Show metadata */}
                 {selectedShow && (
                   <div className="al-meta-bar">
                     <img
@@ -559,22 +562,6 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                {/* ── Polling countdown bar ── */}
-                {selectedSlug && (
-                  <div className="al-poll-bar-wrap">
-                    <div className="al-poll-bar-track">
-                      <div
-                        className="al-poll-bar-fill"
-                        style={{ width: `${countdownPct}%` }}
-                      />
-                    </div>
-                    <span className="al-poll-label">
-                      Refresh stream dalam {countdownSec}d
-                    </span>
-                  </div>
-                )}
-
-                {/* Player area */}
                 <div className="al-player-wrap">
                   {streamLoading && (
                     <div className="al-stream-loading">
@@ -588,44 +575,43 @@ export default function AdminLive() {
                       <p>{streamError}</p>
                       <button
                         className="al-btn-primary sm"
-                        onClick={() => fetchStream(selectedSlug)}
+                        onClick={() => { const s = selectedSlug; setSelectedSlug(null); setTimeout(() => setSelectedSlug(s), 50); }}
                       >
                         Coba Lagi
                       </button>
                     </div>
                   )}
-                  {!streamLoading && !streamError && streamData && (
-                    activeStream?.url ? (
-                      <HLSPlayer
-                        key={activeStream.url}
-                        src={activeStream.url}
-                        title={selectedShow?.title || selectedSlug}
-                      />
-                    ) : (
-                      <div className="al-stream-err">
-                        <span style={{ fontSize: 36 }}>📭</span>
-                        <p>Stream URL tidak tersedia untuk show ini.</p>
-                        <span style={{ color: "#555", fontSize: 12 }}>
-                          Status: {selectedShow?.status}
-                        </span>
-                      </div>
-                    )
+                  {!streamLoading && !streamError && activeStream?.url && (
+                    // key={selectedSlug} → player hanya di-remount kalau ganti show
+                    // bukan karena activeStream.url berubah akibat polling
+                    <HLSPlayer
+                      key={selectedSlug}
+                      src={activeStream.url}
+                      title={selectedShow?.title || selectedSlug}
+                      pollUrl={pollUrl}
+                    />
+                  )}
+                  {!streamLoading && !streamError && streamData && !activeStream?.url && (
+                    <div className="al-stream-err">
+                      <span style={{ fontSize: 36 }}>📭</span>
+                      <p>Stream URL tidak tersedia.</p>
+                      <span style={{ color: "#555", fontSize: 12 }}>Status: {selectedShow?.status}</span>
+                    </div>
                   )}
                 </div>
 
-                {/* Quality selector */}
                 {streamData?.streams?.length > 0 && (
                   <div className="al-quality-row">
                     <span className="al-quality-label">Kualitas:</span>
                     {[...streamData.streams]
                       .sort((a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0))
                       .map((s) => {
-                        const isActive = activeStream?.url === s.url;
+                        const isActive = activeStream?.NAME === s.NAME;
                         return (
                           <button
                             key={s["GROUP-ID"] || s.NAME}
                             className={`al-quality-chip ${isActive ? "active" : ""}`}
-                            onClick={() => setActiveStream(s)}
+                            onClick={() => handlePickQuality(s)}
                             title={`${s.RESOLUTION || ""} · ${Math.round(Number(s.BANDWIDTH || 0) / 1000)}kbps`}
                           >
                             {s.NAME}
@@ -636,7 +622,6 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                {/* Session info */}
                 {streamData?.session && Object.keys(streamData.session).length > 0 && (
                   <div className="al-session-row">
                     {["BROADCAST-ID", "VIDEO-SESSION-ID", "STREAM-TIME", "CLUSTER", "USER-COUNTRY"].map((key) =>
@@ -649,7 +634,6 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                {/* Slug display */}
                 <div className="al-slug-row">
                   <span className="al-slug-label">Slug:</span>
                   <code className="al-slug-code">{selectedSlug}</code>
@@ -662,7 +646,6 @@ export default function AdminLive() {
                   </button>
                 </div>
 
-                {/* Description */}
                 {selectedShow?.idnliveplus?.description && (
                   <div className="al-desc">
                     <h4>Deskripsi</h4>
@@ -701,46 +684,16 @@ const globalStyles = `
     --display: 'Syne', sans-serif;
   }
 
-  @keyframes spin   { to { transform: rotate(360deg); } }
-  @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-  @keyframes pulse  { 0%,100% { opacity:1 } 50% { opacity:.4 } }
-  @keyframes shimmer {
-    0%   { background-position: -400px 0; }
-    100% { background-position:  400px 0; }
-  }
+  @keyframes spin    { to { transform: rotate(360deg); } }
+  @keyframes fadeIn  { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @keyframes pulse   { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+  @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
 
-  .al-noise {
-    pointer-events: none;
-    position: fixed; inset: 0; z-index: 0;
-    background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E");
-    background-size: 200px;
-    opacity: .5;
-  }
+  .al-noise { pointer-events: none; position: fixed; inset: 0; z-index: 0; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"); background-size: 200px; opacity: .5; }
 
-  /* ── LOGIN ── */
-  .al-login-bg {
-    min-height: 100vh;
-    background: var(--bg);
-    display: flex; align-items: center; justify-content: center;
-    font-family: var(--sans);
-    position: relative;
-  }
-  .al-login-bg::before {
-    content: '';
-    position: fixed; inset: 0;
-    background: radial-gradient(ellipse 60% 50% at 50% 50%, #DC1F2E0a 0%, transparent 70%);
-    pointer-events: none;
-  }
-  .al-login-card {
-    position: relative; z-index: 1;
-    width: min(420px, 92vw);
-    background: var(--bg2);
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    padding: 40px 36px;
-    animation: fadeIn .5s ease;
-    box-shadow: 0 32px 80px #00000088, 0 0 0 1px #ffffff06 inset;
-  }
+  .al-login-bg { min-height: 100vh; background: var(--bg); display: flex; align-items: center; justify-content: center; font-family: var(--sans); position: relative; }
+  .al-login-bg::before { content: ''; position: fixed; inset: 0; background: radial-gradient(ellipse 60% 50% at 50% 50%, #DC1F2E0a 0%, transparent 70%); pointer-events: none; }
+  .al-login-card { position: relative; z-index: 1; width: min(420px, 92vw); background: var(--bg2); border: 1px solid var(--line); border-radius: 16px; padding: 40px 36px; animation: fadeIn .5s ease; box-shadow: 0 32px 80px #00000088, 0 0 0 1px #ffffff06 inset; }
   .al-logo { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
   .al-logo-icon { font-size: 28px; color: var(--red); filter: drop-shadow(0 0 8px var(--red)); }
   .al-logo-icon.sm { font-size: 18px; }
@@ -750,105 +703,39 @@ const globalStyles = `
   .al-form { display: flex; flex-direction: column; gap: 16px; }
   .al-field { display: flex; flex-direction: column; gap: 6px; }
   .al-field label { font-size: 11px; font-weight: 600; color: var(--txt2); letter-spacing: 1.5px; text-transform: uppercase; }
-  .al-field input {
-    background: var(--bg3); border: 1px solid var(--line); border-radius: 8px;
-    padding: 11px 14px; color: var(--txt); font-size: 14px; font-family: var(--sans);
-    outline: none; transition: border-color .2s, box-shadow .2s;
-  }
+  .al-field input { background: var(--bg3); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; color: var(--txt); font-size: 14px; font-family: var(--sans); outline: none; transition: border-color .2s, box-shadow .2s; }
   .al-field input:focus { border-color: var(--red-mid); box-shadow: 0 0 0 3px var(--red-dim); }
   .al-error { background: #DC1F2E18; border: 1px solid #DC1F2E44; color: #ff6b6b; font-size: 13px; border-radius: 8px; padding: 10px 14px; }
 
-  /* ── BUTTONS ── */
-  .al-btn-primary {
-    display: flex; align-items: center; justify-content: center; gap: 8px;
-    background: var(--red); color: #fff; border: none; border-radius: 8px;
-    padding: 12px 20px; font-size: 13px; font-weight: 700; letter-spacing: 2px;
-    cursor: pointer; font-family: var(--display);
-    transition: opacity .2s, transform .1s;
-  }
+  .al-btn-primary { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--red); color: #fff; border: none; border-radius: 8px; padding: 12px 20px; font-size: 13px; font-weight: 700; letter-spacing: 2px; cursor: pointer; font-family: var(--display); transition: opacity .2s, transform .1s; }
   .al-btn-primary:hover { opacity: .88; }
   .al-btn-primary:active { transform: scale(.98); }
   .al-btn-primary:disabled { opacity: .5; cursor: not-allowed; }
   .al-btn-primary.sm { padding: 8px 14px; font-size: 12px; }
-  .al-btn-ghost {
-    background: transparent; border: 1px solid var(--line); color: var(--txt2);
-    border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
-    transition: border-color .2s, color .2s; font-family: var(--sans);
-  }
+  .al-btn-ghost { background: transparent; border: 1px solid var(--line); color: var(--txt2); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: border-color .2s, color .2s; font-family: var(--sans); }
   .al-btn-ghost:hover { border-color: var(--txt3); color: var(--txt); }
   .al-btn-ghost.sm { padding: 5px 10px; font-size: 12px; }
-  .al-btn-danger {
-    background: transparent; border: 1px solid #DC1F2E44; color: var(--red);
-    border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer;
-    transition: background .2s; font-family: var(--sans);
-  }
+  .al-btn-danger { background: transparent; border: 1px solid #DC1F2E44; color: var(--red); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: background .2s; font-family: var(--sans); }
   .al-btn-danger:hover { background: var(--red-dim); }
 
-  /* ── SPINNERS ── */
-  .al-spin {
-    display: inline-block; width: 18px; height: 18px;
-    border: 2px solid #ffffff33; border-top-color: #fff;
-    border-radius: 50%; animation: spin .7s linear infinite;
-  }
-  .al-spin.sm  { width: 13px; height: 13px; }
-  .al-spin.xl  { width: 40px; height: 40px; border-width: 3px; border-top-color: var(--red); border-color: var(--red-dim); }
+  .al-spin { display: inline-block; width: 18px; height: 18px; border: 2px solid #ffffff33; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
+  .al-spin.sm { width: 13px; height: 13px; }
+  .al-spin.xl { width: 40px; height: 40px; border-width: 3px; border-top-color: var(--red); border-color: var(--red-dim); }
 
-  /* ── POLL BAR ── */
-  .al-poll-bar-wrap {
-    display: flex; align-items: center; gap: 10px;
-  }
-  .al-poll-bar-track {
-    flex: 1; height: 2px; background: var(--bg3); border-radius: 2px; overflow: hidden;
-  }
-  .al-poll-bar-fill {
-    height: 100%; background: var(--red); border-radius: 2px;
-    transition: width 1s linear;
-  }
-  .al-poll-label {
-    font-size: 10px; color: var(--txt3); font-family: var(--mono);
-    white-space: nowrap; flex-shrink: 0;
-  }
-
-  /* ── DASHBOARD ── */
-  .al-dashboard {
-    min-height: 100vh; background: var(--bg);
-    font-family: var(--sans); color: var(--txt);
-    position: relative; display: flex; flex-direction: column;
-  }
-  .al-header {
-    position: sticky; top: 0; z-index: 100;
-    display: flex; align-items: center; justify-content: space-between;
-    padding: 0 24px; height: 56px;
-    background: var(--bg2); border-bottom: 1px solid var(--line);
-    backdrop-filter: blur(12px);
-  }
+  .al-dashboard { min-height: 100vh; background: var(--bg); font-family: var(--sans); color: var(--txt); position: relative; display: flex; flex-direction: column; }
+  .al-header { position: sticky; top: 0; z-index: 100; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; height: 56px; background: var(--bg2); border-bottom: 1px solid var(--line); backdrop-filter: blur(12px); }
   .al-header-left { display: flex; align-items: center; gap: 10px; }
   .al-header-title { font-family: var(--display); font-size: 15px; font-weight: 800; letter-spacing: 3px; color: var(--txt); }
   .al-badge { background: var(--red); color: #fff; font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 2px 7px; border-radius: 4px; }
   .al-header-right { display: flex; align-items: center; gap: 10px; }
   .al-today { color: var(--txt2); font-size: 12px; font-family: var(--mono); }
-
   .al-content { flex: 1; display: flex; position: relative; z-index: 1; }
 
-  /* ── SIDEBAR ── */
-  .al-sidebar {
-    width: 320px; min-width: 280px;
-    background: var(--bg2); border-right: 1px solid var(--line);
-    display: flex; flex-direction: column;
-    padding: 20px 16px; overflow-y: auto;
-    max-height: calc(100vh - 56px);
-    position: sticky; top: 56px; gap: 12px;
-  }
+  .al-sidebar { width: 320px; min-width: 280px; background: var(--bg2); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 20px 16px; overflow-y: auto; max-height: calc(100vh - 56px); position: sticky; top: 56px; gap: 12px; }
   .al-sidebar-head { display: flex; align-items: center; justify-content: space-between; }
   .al-sidebar-head h2 { font-family: var(--display); font-size: 14px; font-weight: 800; letter-spacing: 2px; color: var(--txt2); text-transform: uppercase; }
   .al-show-list { display: flex; flex-direction: column; gap: 8px; }
-  .al-show-card {
-    display: flex; align-items: flex-start; gap: 10px;
-    background: var(--bg3); border: 1px solid var(--line); border-radius: 10px;
-    padding: 10px; cursor: pointer; text-align: left;
-    transition: border-color .2s, background .2s;
-    position: relative; width: 100%;
-  }
+  .al-show-card { display: flex; align-items: flex-start; gap: 10px; background: var(--bg3); border: 1px solid var(--line); border-radius: 10px; padding: 10px; cursor: pointer; text-align: left; transition: border-color .2s, background .2s; position: relative; width: 100%; }
   .al-show-card:hover { border-color: var(--txt3); background: var(--bg4); }
   .al-show-card.active { border-color: var(--red-mid); background: var(--red-dim); }
   .al-show-thumb { width: 56px; height: 40px; object-fit: cover; border-radius: 6px; flex-shrink: 0; background: var(--bg4); }
@@ -863,13 +750,9 @@ const globalStyles = `
   .al-dot.scheduled { background: #f59e0b; }
   .al-dot.ended     { background: #555; }
 
-  .al-skeleton {
-    background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%);
-    background-size: 400px 100%; animation: shimmer 1.4s infinite linear; border-radius: 8px;
-  }
+  .al-skeleton { background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%); background-size: 400px 100%; animation: shimmer 1.4s infinite linear; border-radius: 8px; }
   .al-empty { color: var(--txt3); font-size: 13px; text-align: center; padding: 24px 0; }
 
-  /* ── MAIN ── */
   .al-main { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; animation: fadeIn .3s ease; }
   .al-no-select { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--txt3); font-size: 15px; text-align: center; padding: 60px 0; }
 
@@ -882,7 +765,6 @@ const globalStyles = `
   .al-player-wrap { border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line); min-height: 200px; position: relative; }
   .al-stream-loading, .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
 
-  /* Quality */
   .al-quality-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .al-quality-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
   .al-quality-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 11px; padding: 3px 10px; border-radius: 20px; font-family: var(--mono); cursor: pointer; transition: border-color .15s, background .15s; }
@@ -891,22 +773,18 @@ const globalStyles = `
   .al-quality-chip em { color: var(--txt3); font-style: normal; margin-left: 4px; }
   .al-quality-chip.active em { color: var(--red); }
 
-  /* Session info */
   .al-session-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
   .al-session-chip { background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 10px; padding: 2px 8px; border-radius: 4px; font-family: var(--mono); }
   .al-session-chip em { color: var(--txt3); font-style: normal; margin-right: 4px; }
 
-  /* Slug */
   .al-slug-row { display: flex; align-items: center; gap: 8px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
   .al-slug-label { color: var(--txt3); font-size: 11px; flex-shrink: 0; }
   .al-slug-code { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--txt2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-  /* Description */
   .al-desc { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
   .al-desc h4 { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--txt3); text-transform: uppercase; margin-bottom: 8px; }
   .al-desc p { font-size: 13px; color: var(--txt2); line-height: 1.7; white-space: pre-line; }
 
-  /* Responsive */
   @media (max-width: 768px) {
     .al-content { flex-direction: column; }
     .al-sidebar { width: 100%; position: static; max-height: 280px; border-right: none; border-bottom: 1px solid var(--line); }
