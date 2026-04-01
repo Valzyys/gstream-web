@@ -6,7 +6,7 @@ const ADMIN_USER        = "JKT48Connect";
 const ADMIN_PASS        = "010907";
 const API_BASE          = "https://v2.jkt48connect.com/api/jkt48";
 const API_KEY           = "JKTCONNECT";
-const PLAYLIST_POLL_MS  = 15_000; // refresh playlist setiap 15 detik
+const PLAYLIST_POLL_MS  = 3_000; // refresh playlist setiap 15 detik
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
