@@ -226,9 +226,6 @@ const Header = () => {
             <button className="mobile-auth-btn login" onClick={() => { setIsMobileMenuOpen(false); navigate("/login"); }}>
               Masuk
             </button>
-            <button className="mobile-auth-btn register" onClick={() => { setIsMobileMenuOpen(false); navigate("/register"); }}>
-              Daftar
-            </button>
           </div>
         ) : (
           <div className="mobile-user-section mobile-only">
