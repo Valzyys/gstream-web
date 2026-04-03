@@ -1,298 +1,211 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useNavigate } from "react-router-dom";
 import "../styles/header.css";
-import {
-  FaPhone,
-  FaEnvelope,
-  FaBell,
-  FaShoppingCart,
-  FaUser,
-  FaChevronDown,
-  FaBars,
-  FaTimes,
-  FaSignOutAlt,
-  FaEllipsisV,
-} from "react-icons/fa";
 
+// ── Inline SVG Icons ──────────────────────────────────────────
+const Icons = {
+  // Logo play/stream icon
+  Logo: () => (
+    <svg viewBox="0 0 24 24" fill="white">
+      <path d="M8 5v14l11-7z" />
+    </svg>
+  ),
+  // User icon
+  User: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  ),
+  // Chevron Down
+  ChevronDown: () => (
+    <svg className="chevron-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+      <polyline points="6 9 12 15 18 9" />
+    </svg>
+  ),
+  // Menu (hamburger)
+  Menu: () => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="3" y1="6" x2="21" y2="6" />
+      <line x1="3" y1="12" x2="21" y2="12" />
+      <line x1="3" y1="18" x2="21" y2="18" />
+    </svg>
+  ),
+  // Close (X)
+  Close: () => (
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <line x1="18" y1="6" x2="6" y2="18" />
+      <line x1="6" y1="6" x2="18" y2="18" />
+    </svg>
+  ),
+  // Profile icon
+  Profile: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </svg>
+  ),
+  // Logout icon
+  Logout: () => (
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
+      <polyline points="16 17 21 12 16 7" />
+      <line x1="21" y1="12" x2="9" y2="12" />
+    </svg>
+  ),
+};
+
+// ══════════════════════════════════════════════════════════════
+//  HEADER COMPONENT
+// ══════════════════════════════════════════════════════════════
 const Header = () => {
   const navigate = useNavigate();
-  const [cartCount, setCartCount] = useState(0);
-  const [notificationCount, setNotificationCount] = useState(2);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [userInfo, setUserInfo] = useState(null);
-  const [dropdowns, setDropdowns] = useState({
-    kategori: false,
-    akun: false,
-    bantuan: false,
-    menu: false,
-  });
+  const [dropdownOpen, setDropdownOpen] = useState(false);
+  const dropdownRef = useRef(null);
 
-  const dropdownRefs = useRef({
-    kategori: null,
-    akun: null,
-    bantuan: null,
-    menu: null,
-  });
-
-  // Function to get cart count from localStorage
-  const getCartCount = () => {
-    try {
-      const cartData = JSON.parse(localStorage.getItem("cart") || "[]");
-      const totalItems = cartData.reduce(
-        (total, item) => total + (item.quantity || 1),
-        0
-      );
-      return totalItems;
-    } catch (error) {
-      console.error("Error reading cart from localStorage:", error);
-      return 0;
-    }
-  };
-
-  // Function to check login status
+  // ── Auth check ─────────────────────────────────────────────
   const checkAuthStatus = () => {
     try {
-      const loginData = JSON.parse(
-        sessionStorage.getItem("userLogin") || "null"
-      );
-      if (loginData && loginData.isLoggedIn && loginData.token) {
+      const loginData = JSON.parse(sessionStorage.getItem("userLogin") || "null");
+      if (loginData?.isLoggedIn && loginData?.token) {
         setIsLoggedIn(true);
         setUserInfo(loginData.user || { username: "User" });
         return;
       }
 
-      const registrationData = JSON.parse(
-        sessionStorage.getItem("userRegistration") || "null"
-      );
-      if (registrationData && registrationData.isRegistered) {
+      const regData = JSON.parse(sessionStorage.getItem("userRegistration") || "null");
+      if (regData?.isRegistered) {
         setIsLoggedIn(true);
-        setUserInfo({
-          username: registrationData.username || "User",
-          ...registrationData.userData,
-        });
+        setUserInfo({ username: regData.username || "User", ...regData.userData });
         return;
       }
 
-      const successfulRegData = JSON.parse(
-        localStorage.getItem("successfulRegistration") || "null"
-      );
-      if (successfulRegData && successfulRegData.isSuccessfullyRegistered) {
+      const successReg = JSON.parse(localStorage.getItem("successfulRegistration") || "null");
+      if (successReg?.isSuccessfullyRegistered) {
         setIsLoggedIn(true);
         setUserInfo({
-          username: successfulRegData.username || "User",
-          email: successfulRegData.email,
-          full_name: successfulRegData.full_name,
+          username: successReg.username || "User",
+          email: successReg.email,
+          full_name: successReg.full_name,
         });
         return;
       }
 
       setIsLoggedIn(false);
       setUserInfo(null);
-    } catch (error) {
-      console.error("Error checking auth status:", error);
+    } catch {
       setIsLoggedIn(false);
       setUserInfo(null);
     }
   };
 
-  // Function to handle logout
+  // ── Logout ─────────────────────────────────────────────────
   const handleLogout = () => {
-    try {
-      sessionStorage.removeItem("userLogin");
-      sessionStorage.removeItem("userRegistration");
-      sessionStorage.removeItem("authToken");
-      localStorage.removeItem("successfulRegistration");
-      localStorage.removeItem("registerFormData");
-
-      setIsLoggedIn(false);
-      setUserInfo(null);
-      setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
-      setIsMobileMenuOpen(false);
-
-      navigate("/");
-    } catch (error) {
-      console.error("Error during logout:", error);
-    }
+    sessionStorage.removeItem("userLogin");
+    sessionStorage.removeItem("userRegistration");
+    sessionStorage.removeItem("authToken");
+    localStorage.removeItem("successfulRegistration");
+    localStorage.removeItem("registerFormData");
+    setIsLoggedIn(false);
+    setUserInfo(null);
+    setDropdownOpen(false);
+    setIsMobileMenuOpen(false);
+    navigate("/");
   };
 
-  // Update cart count
-  useEffect(() => {
-    const updateCartCount = () => setCartCount(getCartCount());
-    updateCartCount();
-    const handleStorageChange = (e) => {
-      if (e.key === "cart") updateCartCount();
-    };
-    window.addEventListener("storage", handleStorageChange);
-    window.addEventListener("cartUpdated", updateCartCount);
-    return () => {
-      window.removeEventListener("storage", handleStorageChange);
-      window.removeEventListener("cartUpdated", updateCartCount);
-    };
-  }, []);
-
-  // Check auth status
+  // ── Effects ────────────────────────────────────────────────
   useEffect(() => {
     checkAuthStatus();
-    const handleStorageChange = (e) => {
-      if (
-        ["userLogin", "userRegistration", "successfulRegistration"].includes(
-          e.key
-        )
-      ) {
+    const iv = setInterval(checkAuthStatus, 2000);
+    const handleStorage = (e) => {
+      if (["userLogin", "userRegistration", "successfulRegistration"].includes(e.key)) {
         checkAuthStatus();
       }
     };
-    window.addEventListener("storage", handleStorageChange);
-    const authCheckInterval = setInterval(checkAuthStatus, 1000);
+    window.addEventListener("storage", handleStorage);
     return () => {
-      window.removeEventListener("storage", handleStorageChange);
-      clearInterval(authCheckInterval);
+      clearInterval(iv);
+      window.removeEventListener("storage", handleStorage);
     };
   }, []);
 
-  // Periodic cart count update
+  // Close dropdown on outside click
   useEffect(() => {
-    const interval = setInterval(() => setCartCount(getCartCount()), 1000);
-    return () => clearInterval(interval);
-  }, []);
-
-  const handleDropdownToggle = (dropdownName) => {
-    setDropdowns((prev) => {
-      const newState = {
-        kategori: dropdownName === "kategori" ? !prev.kategori : false,
-        akun: dropdownName === "akun" ? !prev.akun : false,
-        bantuan: dropdownName === "bantuan" ? !prev.bantuan : false,
-        menu: dropdownName === "menu" ? !prev.menu : false,
-      };
-
-      setTimeout(() => {
-        const dropdownElement = dropdownRefs.current[dropdownName];
-        if (dropdownElement && newState[dropdownName]) {
-          const dropdownMenu = dropdownElement.querySelector(".dropdown-menu");
-          if (dropdownMenu) {
-            const dropdownRect = dropdownElement.getBoundingClientRect();
-            const viewportWidth = window.innerWidth;
-            dropdownMenu.classList.remove("dropdown-menu-right");
-            if (dropdownRect.left + 200 > viewportWidth - 20) {
-              dropdownMenu.classList.add("dropdown-menu-right");
-            }
-          }
-        }
-      }, 10);
-
-      return newState;
-    });
-  };
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      const isClickInsideDropdown = Object.values(dropdownRefs.current).some(
-        (ref) => ref && ref.contains(event.target)
-      );
-      if (!isClickInsideDropdown) {
-        setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
+    const handleClickOutside = (e) => {
+      if (dropdownRef.current && !dropdownRef.current.contains(e.target)) {
+        setDropdownOpen(false);
       }
     };
     document.addEventListener("mousedown", handleClickOutside);
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
-  // Close on resize
+  // Close mobile menu on resize
   useEffect(() => {
     const handleResize = () => {
       if (window.innerWidth > 768) setIsMobileMenuOpen(false);
-      setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
+      setDropdownOpen(false);
     };
     window.addEventListener("resize", handleResize);
     return () => window.removeEventListener("resize", handleResize);
   }, []);
 
-  const handleCartClick = () => navigate("/keranjang");
-  const handleLogoClick = () => navigate("/");
-  const handleLoginClick = () => navigate("/login");
-  const handleRegisterClick = () => navigate("/register");
-  const toggleMobileMenu = () => {
-    setIsMobileMenuOpen(!isMobileMenuOpen);
-    setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
-  };
-
   return (
     <header>
-      {/* Navbar */}
       <nav className="navbar">
         {/* Logo */}
-        <div
-          className="logo"
-          onClick={handleLogoClick}
-          style={{ cursor: "pointer" }}
-        >
-          <span className="logo-bold">GSTREAM</span>
+        <div className="logo" onClick={() => navigate("/")}>
+          <span className="logo-bold">GISTREAM</span>
         </div>
 
-        {/* Desktop: Auth buttons atau user dropdown */}
+        {/* Desktop: right side */}
         <div className="nav-icons desktop-only">
           {!isLoggedIn ? (
-            /* Belum login: tombol Masuk & Daftar */
             <div className="auth-buttons">
-              <button
-                className="auth-btn login-btn"
-                onClick={handleLoginClick}
-              >
+              <button className="auth-btn login-btn" onClick={() => navigate("/login")}>
                 Masuk
               </button>
             </div>
           ) : (
-            /* Sudah login: dropdown akun */
-            <div
-              className={`dropdown ${dropdowns.akun ? "show" : ""}`}
-              ref={(el) => (dropdownRefs.current.akun = el)}
-            >
+            <div className={`dropdown ${dropdownOpen ? "show" : ""}`} ref={dropdownRef}>
               <button
-                className="icon-btn user-btn logged-in"
-                onClick={() => handleDropdownToggle("akun")}
+                className="user-btn logged-in"
+                onClick={() => setDropdownOpen((p) => !p)}
               >
-                <FaUser />
+                <div className="user-avatar-circle">
+                  {userInfo?.avatar ? (
+                    <img src={userInfo.avatar} alt="avatar" style={{ width: '100%', height: '100%', borderRadius: 'inherit', objectFit: 'cover' }} />
+                  ) : (
+                    <Icons.User />
+                  )}
+                </div>
                 <span className="username">
                   {userInfo?.username || userInfo?.full_name || "User"}
                 </span>
-                <FaChevronDown />
+                <Icons.ChevronDown />
               </button>
 
-              <div
-                className={`dropdown-menu dropdown-menu-right ${
-                  dropdowns.akun ? "show" : ""
-                }`}
-              >
-                {/* Info user */}
+              <div className={`dropdown-menu ${dropdownOpen ? "show" : ""}`}>
                 <div className="dropdown-user-info">
-                  <strong>
-                    {userInfo?.full_name || userInfo?.username || "User"}
-                  </strong>
+                  <strong>{userInfo?.full_name || userInfo?.username || "User"}</strong>
                   <small>{userInfo?.email || ""}</small>
                 </div>
 
-                <div className="dropdown-divider" />
-
                 <button
                   className="dropdown-item"
-                  onClick={() => {
-                    setDropdowns({ kategori: false, akun: false, bantuan: false, menu: false });
-                    navigate("/profile");
-                  }}
+                  onClick={() => { setDropdownOpen(false); navigate("/profile"); }}
                 >
-                  <FaUser style={{ marginRight: 8 }} />
+                  <Icons.Profile />
                   Profil Saya
                 </button>
 
                 <div className="dropdown-divider" />
 
-                <button
-                  className="dropdown-item logout-btn"
-                  onClick={handleLogout}
-                >
-                  <FaSignOutAlt style={{ marginRight: 8 }} />
+                <button className="dropdown-item logout-btn" onClick={handleLogout}>
+                  <Icons.Logout />
                   Keluar
                 </button>
               </div>
@@ -300,41 +213,33 @@ const Header = () => {
           )}
         </div>
 
-        {/* Mobile: hamburger button */}
-        <button className="mobile-menu-btn" onClick={toggleMobileMenu}>
-          {isMobileMenuOpen ? <FaTimes /> : <FaBars />}
+        {/* Mobile: hamburger */}
+        <button className="mobile-menu-btn" onClick={() => setIsMobileMenuOpen((p) => !p)}>
+          {isMobileMenuOpen ? <Icons.Close /> : <Icons.Menu />}
         </button>
       </nav>
 
-      {/* Mobile Menu */}
+      {/* Mobile menu panel */}
       <div className={`mobile-menu ${isMobileMenuOpen ? "open" : ""}`}>
         {!isLoggedIn ? (
-          /* Mobile: belum login */
           <div className="mobile-auth-buttons mobile-only">
-            <button
-              className="mobile-auth-btn login"
-              onClick={() => {
-                setIsMobileMenuOpen(false);
-                handleLoginClick();
-              }}
-            >
+            <button className="mobile-auth-btn login" onClick={() => { setIsMobileMenuOpen(false); navigate("/login"); }}>
               Masuk
             </button>
-            <button
-              className="mobile-auth-btn register"
-              onClick={() => {
-                setIsMobileMenuOpen(false);
-                handleRegisterClick();
-              }}
-            >
+            <button className="mobile-auth-btn register" onClick={() => { setIsMobileMenuOpen(false); navigate("/register"); }}>
               Daftar
             </button>
           </div>
         ) : (
-          /* Mobile: sudah login */
           <div className="mobile-user-section mobile-only">
             <div className="mobile-user-info">
-              <FaUser className="user-icon" />
+              <div className="mobile-user-avatar">
+                {userInfo?.avatar ? (
+                  <img src={userInfo.avatar} alt="avatar" style={{ width: '100%', height: '100%', borderRadius: 'inherit', objectFit: 'cover' }} />
+                ) : (
+                  <Icons.User />
+                )}
+              </div>
               <div className="user-details">
                 <span className="username">
                   {userInfo?.username || userInfo?.full_name || "User"}
@@ -342,10 +247,20 @@ const Header = () => {
                 <span className="email">{userInfo?.email || ""}</span>
               </div>
             </div>
-            <button className="mobile-logout-btn" onClick={handleLogout}>
-              <FaSignOutAlt />
-              Keluar
-            </button>
+
+            <div className="mobile-menu-actions">
+              <button
+                className="mobile-menu-item"
+                onClick={() => { setIsMobileMenuOpen(false); navigate("/profile"); }}
+              >
+                <Icons.Profile />
+                Profil Saya
+              </button>
+              <button className="mobile-menu-item logout" onClick={handleLogout}>
+                <Icons.Logout />
+                Keluar
+              </button>
+            </div>
           </div>
         )}
       </div>
@@ -354,4 +269,3 @@ const Header = () => {
 };
 
 export default Header;
-
