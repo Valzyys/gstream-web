@@ -7,6 +7,7 @@ const API_KEY = "JKTCONNECT";
 const MUX_API = `${API_BASE}/mux/live-streams?apikey=${API_KEY}&username=vzy&password=vzy`;
 const IDN_PLUS_API = `${API_BASE}/jkt48/idnplus?apikey=${API_KEY}`;
 const THEATER_API = `${API_BASE}/jkt48/theater?apikey=${API_KEY}`;
+const RECENT_API = `${API_BASE}/jkt48/recent?apikey=${API_KEY}`;
 
 // ── Type filter: hanya tampilkan SHOW dan EVENT dari theater ────────────────
 const ALLOWED_THEATER_TYPES = ["SHOW", "EVENT"];
@@ -724,6 +725,63 @@ function StreamCard({ show }) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  RECENT LIVE SECTION (MARQUEE)
+// ══════════════════════════════════════════════════════════════════════════════
+function RecentLiveSection() {
+  const [recentShows, setRecentShows] = useState([]);
+
+  useEffect(() => {
+    fetch(RECENT_API)
+      .then((res) => res.json())
+      .then((data) => {
+        if (Array.isArray(data)) {
+          // Duplicate array to ensure seamless marquee rolling even if few items
+          setRecentShows([...data, ...data]);
+        }
+      })
+      .catch((err) => console.error("Error fetching recent live:", err));
+  }, []);
+
+  if (recentShows.length === 0) return null;
+
+  return (
+    <div className="recent-live-section fade-in-up-delay-2">
+      <div className="recent-live-header">
+        <div className="section-icon live">
+          <Icons.Radio size={16} color="#ff4757" />
+        </div>
+        <h3 className="section-title">Recent Member Live</h3>
+      </div>
+      <div className="recent-live-marquee">
+        {recentShows.map((show, idx) => (
+          <div key={`${show._id}-${idx}`} className="recent-member-card">
+            <img
+              className="recent-member-avatar"
+              src={show.member?.img_alt || show.member?.img || DEFAULT_IMG}
+              alt={show.member?.nickname || show.member?.name || "Member"}
+              onError={(e) => { e.target.src = DEFAULT_IMG; }}
+            />
+            <div className="recent-member-info">
+              <h4 className="recent-member-name">
+                {show.member?.nickname || show.member?.name?.split('/')[0] || "JKT48"}
+              </h4>
+              <p className="recent-member-meta">
+                <span className={`recent-platform-badge ${show.type}`}>
+                  {show.type === 'idn' ? 'IDN Live' : 'Showroom'}
+                </span>
+                <span style={{opacity: 0.6}}>•</span>
+                <Icons.User size={10} color="rgba(255,255,255,0.5)" />
+                {show.live_info?.viewers?.num?.toLocaleString('id-ID') || 0}
+              </p>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
 //  HOME PAGE
 // ══════════════════════════════════════════════════════════════════════════════
 function Home() {
@@ -733,6 +791,7 @@ function Home() {
         <HeroCarousel />
         <NextShowSection />
         <LiveShowsSection />
+        <RecentLiveSection />
       </div>
     </div>
   );
