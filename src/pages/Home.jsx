@@ -228,14 +228,12 @@ function normalizeShow(show, src) {
 // ══════════════════════════════════════════════════════════════════════════════
 function NextShowSection() {
   const [shows, setShows] = useState([]);
-  const [source, setSource] = useState(null); // "idn" | "theater"
+  const [source, setSource] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [countdown, setCountdown] = useState({ days: 0, hours: 0, mins: 0, secs: 0 });
 
   useEffect(() => {
     const fetchShows = async () => {
       try {
-        // ── 1. Coba IDN Plus dulu ──────────────────────────────────────────
         let idnShows = [];
         try {
           const res = await fetch(IDN_PLUS_API);
@@ -253,7 +251,6 @@ function NextShowSection() {
           return;
         }
 
-        // ── 2. Fallback ke Theater ─────────────────────────────────────────
         let theaterShows = [];
         try {
           const res = await fetch(THEATER_API);
@@ -265,13 +262,10 @@ function NextShowSection() {
           console.error("Error fetching Theater:", e);
         }
 
-        // Filter hanya SHOW dan EVENT, buang GENERAL dan tipe lain
         const filtered = theaterShows.filter((s) =>
           ALLOWED_THEATER_TYPES.includes((s.type || "").toUpperCase())
         );
 
-        // Deduplication: key = title_lowercase + tanggal
-        // (guard jika suatu saat IDN Plus partial return & theater juga ada)
         const idnKeys = new Set(
           idnShows.map((s) => {
             const d = s.scheduled_at
@@ -299,34 +293,6 @@ function NextShowSection() {
     fetchShows();
   }, []);
 
-  // ── Pilih show terdekat yang belum lewat ───────────────────────────────────
-  const nextShow =
-    shows.find((s) => s.status === "live") ||
-    shows.find((s) => s.status === "scheduled" && s.scheduledAt && s.scheduledAt > Date.now()) ||
-    shows.find((s) => s.status === "scheduled") ||
-    shows[0] ||
-    null;
-
-  // ── Countdown ─────────────────────────────────────────────────────────────
-  useEffect(() => {
-    if (!nextShow?.scheduledAt || nextShow.status === "live") return;
-    const target = nextShow.scheduledAt;
-
-    const tick = () => {
-      const diff = Math.max(0, target - Date.now());
-      setCountdown({
-        days: Math.floor(diff / (1000 * 60 * 60 * 24)),
-        hours: Math.floor((diff / (1000 * 60 * 60)) % 24),
-        mins: Math.floor((diff / (1000 * 60)) % 60),
-        secs: Math.floor((diff / 1000) % 60),
-      });
-    };
-
-    tick();
-    const iv = setInterval(tick, 1000);
-    return () => clearInterval(iv);
-  }, [nextShow?.scheduledAt, nextShow?.status]);
-
   const formatDate = (ts) => {
     if (!ts) return "";
     return new Date(ts).toLocaleDateString("id-ID", {
@@ -344,11 +310,13 @@ function NextShowSection() {
     );
   };
 
-  // ── Label badge tipe show (theater only) ──────────────────────────────────
   const typeLabelColor = {
     SHOW: { bg: "rgba(220,31,46,0.15)", color: "#DC1F2E" },
     EVENT: { bg: "rgba(255,215,0,0.15)", color: "#FFD700" },
   };
+
+  const liveCount = shows.filter((s) => s.status === "live").length;
+  const totalCount = shows.length;
 
   return (
     <div className="next-show-section fade-in-up-delay-1">
@@ -359,28 +327,24 @@ function NextShowSection() {
             <Icons.Theater size={18} color="#FFD700" />
           </div>
           <div>
-            <h2 className="section-title">Upcoming Show</h2>
+            <h2 className="section-title">Upcoming Shows</h2>
             <p className="section-subtitle">
               {source === "theater"
-                ? "Jadwal show terdekat dari JKT48 Theater"
-                : "Jadwal show terdekat dari IDN Live Plus"}
+                ? "Jadwal show dari JKT48 Theater"
+                : "Jadwal show dari IDN Live Plus"}
             </p>
           </div>
         </div>
-        {nextShow && (
-          <span
-            className={`section-badge ${
-              nextShow.status === "live" ? "live-badge" : "count-badge"
-            }`}
-          >
-            {nextShow.status === "live" ? (
+        {totalCount > 0 && (
+          <span className={`section-badge ${liveCount > 0 ? "live-badge" : "count-badge"}`}>
+            {liveCount > 0 ? (
               <>
-                <span className="pulse-dot"></span> LIVE NOW
+                <span className="pulse-dot"></span> {liveCount} LIVE
               </>
             ) : (
               <>
                 <Icons.Calendar size={12} color="rgba(255,255,255,0.5)" />{" "}
-                {formatDate(nextShow.scheduledAt)}
+                {totalCount} Show
               </>
             )}
           </span>
@@ -393,166 +357,207 @@ function NextShowSection() {
           <div className="skeleton-spinner"></div>
           <p>Memuat jadwal show...</p>
         </div>
-      ) : !nextShow ? (
+      ) : shows.length === 0 ? (
         <div className="no-next-show">
           <Icons.Curtain size={52} color="rgba(255,255,255,0.5)" />
           <h4>Belum Ada Jadwal Show</h4>
           <p>Jadwal show akan muncul di sini saat tersedia.</p>
         </div>
       ) : (
-        <div className="next-show-card">
-          <div className="next-show-inner">
-            {/* Poster */}
-            <div className="next-show-poster">
-              <img
-                src={nextShow.image}
-                alt={nextShow.title}
-                onError={(e) => { e.target.src = DEFAULT_IMG; }}
-              />
-              <div
-                className={`next-show-status-badge ${
-                  nextShow.status === "live" ? "live" : "scheduled"
-                }`}
-              >
-                <span className="status-dot"></span>
-                {nextShow.status === "live" ? "LIVE" : "SCHEDULED"}
+        <div className="upcoming-shows-grid">
+          {shows.map((show) => (
+            <ShowCard
+              key={show.id}
+              show={show}
+              formatDate={formatDate}
+              formatTime={formatTime}
+              typeLabelColor={typeLabelColor}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Show Card (per item) ────────────────────────────────────────────────────
+function ShowCard({ show, formatDate, formatTime, typeLabelColor }) {
+  const [countdown, setCountdown] = useState({ days: 0, hours: 0, mins: 0, secs: 0 });
+
+  useEffect(() => {
+    if (!show.scheduledAt || show.status === "live") return;
+    const target = show.scheduledAt;
+
+    const tick = () => {
+      const diff = Math.max(0, target - Date.now());
+      setCountdown({
+        days: Math.floor(diff / (1000 * 60 * 60 * 24)),
+        hours: Math.floor((diff / (1000 * 60 * 60)) % 24),
+        mins: Math.floor((diff / (1000 * 60)) % 60),
+        secs: Math.floor((diff / 1000) % 60),
+      });
+    };
+
+    tick();
+    const iv = setInterval(tick, 1000);
+    return () => clearInterval(iv);
+  }, [show.scheduledAt, show.status]);
+
+  return (
+    <div className="next-show-card">
+      <div className="next-show-inner">
+        {/* Poster */}
+        <div className="next-show-poster">
+          <img
+            src={show.image}
+            alt={show.title}
+            onError={(e) => { e.target.src = DEFAULT_IMG; }}
+          />
+          <div
+            className={`next-show-status-badge ${
+              show.status === "live" ? "live" : "scheduled"
+            }`}
+          >
+            <span className="status-dot"></span>
+            {show.status === "live" ? "LIVE" : "SCHEDULED"}
+          </div>
+        </div>
+
+        {/* Details */}
+        <div className="next-show-details">
+          <h3 className="next-show-name">{show.title}</h3>
+
+          {/* Badge tipe show */}
+          {show.source === "theater" && show.type && (
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: 600,
+                letterSpacing: "0.04em",
+                padding: "3px 10px",
+                borderRadius: "999px",
+                background:
+                  typeLabelColor[show.type]?.bg || "rgba(255,255,255,0.1)",
+                color:
+                  typeLabelColor[show.type]?.color || "rgba(255,255,255,0.7)",
+                display: "inline-block",
+                marginBottom: "8px",
+              }}
+            >
+              {show.type}
+              {show.referenceCode ? ` · ${show.referenceCode}` : ""}
+            </span>
+          )}
+
+          {show.description && (
+            <p className="next-show-description">{show.description}</p>
+          )}
+
+          {/* Birthday members */}
+          {show.isBirthday && show.birthdayMembers?.length > 0 && (
+            <div
+              style={{
+                display: "flex",
+                gap: "8px",
+                flexWrap: "wrap",
+                margin: "8px 0",
+              }}
+            >
+              {show.birthdayMembers.map((m) => (
+                <div
+                  key={m.name}
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                    background: "rgba(255,255,255,0.07)",
+                    borderRadius: "999px",
+                    padding: "4px 10px 4px 4px",
+                    fontSize: "12px",
+                  }}
+                >
+                  <img
+                    src={m.img_alt || m.img}
+                    alt={m.name}
+                    style={{
+                      width: 24,
+                      height: 24,
+                      borderRadius: "50%",
+                      objectFit: "cover",
+                    }}
+                    onError={(e) => { e.target.style.display = "none"; }}
+                  />
+                  <span style={{ color: "rgba(255,255,255,0.85)" }}>
+                    🎂 {m.name}
+                  </span>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Countdown — hanya tampil jika belum lewat & bukan live */}
+          {show.scheduledAt &&
+            show.status !== "live" &&
+            show.scheduledAt > Date.now() && (
+              <div className="next-show-countdown">
+                {[
+                  { val: countdown.days, label: "Hari" },
+                  { val: countdown.hours, label: "Jam" },
+                  { val: countdown.mins, label: "Menit" },
+                  { val: countdown.secs, label: "Detik" },
+                ].map((u, i) => (
+                  <div
+                    key={u.label}
+                    style={{ display: "flex", alignItems: "center" }}
+                  >
+                    {i > 0 && <span className="countdown-separator">:</span>}
+                    <div className="countdown-unit">
+                      <div className="countdown-value">
+                        {String(u.val).padStart(2, "0")}
+                      </div>
+                      <span className="countdown-label">{u.label}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+          {/* Meta info */}
+          <div className="next-show-meta">
+            {show.scheduledAt && (
+              <div className="next-show-meta-item">
+                <div className="meta-icon">
+                  <Icons.Calendar size={15} color="rgba(255,255,255,0.5)" />
+                </div>
+                <div>
+                  <div className="meta-label">Tanggal</div>
+                  <div className="meta-value">{formatDate(show.scheduledAt)}</div>
+                </div>
+              </div>
+            )}
+
+            <div className="next-show-meta-item">
+              <div className="meta-icon">
+                <Icons.Clock size={15} color="rgba(255,255,255,0.5)" />
+              </div>
+              <div>
+                <div className="meta-label">Waktu</div>
+                <div className="meta-value">{formatTime(show.scheduledAt)}</div>
               </div>
             </div>
 
-            {/* Details */}
-            <div className="next-show-details">
-              <h3 className="next-show-name">{nextShow.title}</h3>
-
-              {/* Badge tipe show (theater only: SHOW / EVENT) */}
-              {nextShow.source === "theater" && nextShow.type && (
-                <span
-                  style={{
-                    fontSize: "11px",
-                    fontWeight: 600,
-                    letterSpacing: "0.04em",
-                    padding: "3px 10px",
-                    borderRadius: "999px",
-                    background:
-                      typeLabelColor[nextShow.type]?.bg ||
-                      "rgba(255,255,255,0.1)",
-                    color:
-                      typeLabelColor[nextShow.type]?.color ||
-                      "rgba(255,255,255,0.7)",
-                    display: "inline-block",
-                    marginBottom: "8px",
-                  }}
-                >
-                  {nextShow.type}
-                  {nextShow.referenceCode
-                    ? ` · ${nextShow.referenceCode}`
-                    : ""}
-                </span>
-              )}
-
-              {nextShow.description && (
-                <p className="next-show-description">{nextShow.description}</p>
-              )}
-
-              {/* Birthday members (theater only) */}
-              {nextShow.isBirthday &&
-                nextShow.birthdayMembers?.length > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      gap: "8px",
-                      flexWrap: "wrap",
-                      margin: "8px 0",
-                    }}
-                  >
-                    {nextShow.birthdayMembers.map((m) => (
-                      <div
-                        key={m.name}
-                        style={{
-                          display: "flex",
-                          alignItems: "center",
-                          gap: "6px",
-                          background: "rgba(255,255,255,0.07)",
-                          borderRadius: "999px",
-                          padding: "4px 10px 4px 4px",
-                          fontSize: "12px",
-                        }}
-                      >
-                        <img
-                          src={m.img_alt || m.img}
-                          alt={m.name}
-                          style={{
-                            width: 24,
-                            height: 24,
-                            borderRadius: "50%",
-                            objectFit: "cover",
-                          }}
-                          onError={(e) => {
-                            e.target.style.display = "none";
-                          }}
-                        />
-                        <span style={{ color: "rgba(255,255,255,0.85)" }}>
-                          🎂 {m.name}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-              {/* Countdown */}
-              {nextShow.scheduledAt && nextShow.status !== "live" && (
-                <div className="next-show-countdown">
-                  {[
-                    { val: countdown.days, label: "Hari" },
-                    { val: countdown.hours, label: "Jam" },
-                    { val: countdown.mins, label: "Menit" },
-                    { val: countdown.secs, label: "Detik" },
-                  ].map((u, i) => (
-                    <div
-                      key={u.label}
-                      style={{ display: "flex", alignItems: "center" }}
-                    >
-                      {i > 0 && (
-                        <span className="countdown-separator">:</span>
-                      )}
-                      <div className="countdown-unit">
-                        <div className="countdown-value">
-                          {String(u.val).padStart(2, "0")}
-                        </div>
-                        <span className="countdown-label">{u.label}</span>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Meta info */}
-              <div className="next-show-meta">
-                <div className="next-show-meta-item">
-                  <div className="meta-icon">
-                    <Icons.Clock size={15} color="rgba(255,255,255,0.5)" />
-                  </div>
-                  <div>
-                    <div className="meta-label">Waktu</div>
-                    <div className="meta-value">
-                      {formatTime(nextShow.scheduledAt)}
-                    </div>
-                  </div>
-                </div>
-
-                <div className="next-show-meta-item">
-                  <div className="meta-icon">
-                    <Icons.User size={15} color="rgba(255,255,255,0.5)" />
-                  </div>
-                  <div>
-                    <div className="meta-label">Creator</div>
-                    <div className="meta-value">{nextShow.creator}</div>
-                  </div>
-                </div>
+            <div className="next-show-meta-item">
+              <div className="meta-icon">
+                <Icons.User size={15} color="rgba(255,255,255,0.5)" />
+              </div>
+              <div>
+                <div className="meta-label">Creator</div>
+                <div className="meta-value">{show.creator}</div>
               </div>
             </div>
           </div>
         </div>
-      )}
+      </div>
     </div>
   );
 }
