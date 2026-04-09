@@ -235,6 +235,13 @@ const categoryColor = {
   Other:    { bg: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.5)" },
 };
 
+function proxyImg(url) {
+  if (!url) return DEFAULT_IMG;
+  if (!url.includes("jkt48.com")) return url;
+  // Ganti dengan URL worker kamu
+  return `https://autumn-limit-898f.aslannarnia806.workers.dev/?url=${encodeURIComponent(url)}`;
+}
+
 function NewsSection() {
   const [news, setNews]       = useState([]);
   const [loading, setLoading] = useState(true);
@@ -310,10 +317,10 @@ function NewsSection() {
               {/* Thumbnail */}
               <div className="news-card-thumb">
                 <img
-                  src={item.background_image}
-                  alt={item.title}
-                  onError={(e) => { e.target.src = DEFAULT_IMG; }}
-                />
+  src={proxyImg(item.background_image)}
+  alt={item.title}
+  onError={(e) => { e.target.src = DEFAULT_IMG; }}
+/>
                 {/* Category badge */}
                 <span
                   className="news-category-badge"
