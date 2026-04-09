@@ -224,6 +224,125 @@ function normalizeShow(show, src) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  NEWS SECTION
+// ══════════════════════════════════════════════════════════════════════════════
+const NEWS_API = `https://v2.jkt48connect.com/api/jkt48/NEWS?apikey=JKTCONNECT`;
+
+const categoryColor = {
+  Theater:  { bg: "rgba(220,31,46,0.15)",  color: "#DC1F2E" },
+  Birthday: { bg: "rgba(255,105,180,0.15)", color: "#FF69B4" },
+  Event:    { bg: "rgba(255,215,0,0.15)",  color: "#FFD700" },
+  Other:    { bg: "rgba(255,255,255,0.08)", color: "rgba(255,255,255,0.5)" },
+};
+
+function NewsSection() {
+  const [news, setNews]       = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetch(NEWS_API)
+      .then((r) => r.json())
+      .then((data) => {
+        if (data.success && Array.isArray(data.news)) {
+          setNews(data.news);
+        }
+      })
+      .catch((e) => console.error("Error fetching news:", e))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const formatNewsDate = (dateStr) => {
+    if (!dateStr) return "";
+    return new Date(dateStr).toLocaleDateString("id-ID", {
+      day: "numeric", month: "short", year: "numeric",
+    });
+  };
+
+  const getCategoryStyle = (cat) =>
+    categoryColor[cat] || categoryColor.Other;
+
+  return (
+    <div className="news-section fade-in-up-delay-2">
+      {/* Header */}
+      <div className="section-header">
+        <div className="section-label">
+          <div className="section-icon news-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+              stroke="#60a5fa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <path d="M4 22h16a2 2 0 0 0 2-2V4a2 2 0 0 0-2-2H8a2 2 0 0 0-2 2v16a2 2 0 0 1-2 2Zm0 0a2 2 0 0 1-2-2v-9c0-1.1.9-2 2-2h2"/>
+              <path d="M18 14h-8"/><path d="M15 18h-5"/><path d="M10 6h8v4h-8V6Z"/>
+            </svg>
+          </div>
+          <div>
+            <h2 className="section-title">Berita Terbaru</h2>
+            <p className="section-subtitle">Informasi & pengumuman resmi JKT48</p>
+          </div>
+        </div>
+        {news.length > 0 && (
+          <span className="section-badge count-badge">
+            <Icons.Calendar size={12} color="rgba(255,255,255,0.5)" />
+            {news.length} Berita
+          </span>
+        )}
+      </div>
+
+      {/* Content */}
+      {loading ? (
+        <div className="section-loading">
+          <div className="loading-spinner" style={{ borderTopColor: "#60a5fa" }}></div>
+          <p>Memuat berita...</p>
+        </div>
+      ) : news.length === 0 ? (
+        <div className="no-live-state">
+          <h3>Belum Ada Berita</h3>
+          <p>Berita terbaru akan muncul di sini.</p>
+        </div>
+      ) : (
+        <div className="news-grid">
+          {news.map((item) => (
+            <a
+              key={item.id}
+              href={item.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="news-card"
+            >
+              {/* Thumbnail */}
+              <div className="news-card-thumb">
+                <img
+                  src={item.background_image}
+                  alt={item.title}
+                  onError={(e) => { e.target.src = DEFAULT_IMG; }}
+                />
+                {/* Category badge */}
+                <span
+                  className="news-category-badge"
+                  style={{
+                    background: getCategoryStyle(item.category).bg,
+                    color: getCategoryStyle(item.category).color,
+                    border: `1px solid ${getCategoryStyle(item.category).color}40`,
+                  }}
+                >
+                  {item.category}
+                </span>
+              </div>
+
+              {/* Info */}
+              <div className="news-card-info">
+                <h3 className="news-card-title">{item.title}</h3>
+                <div className="news-card-meta">
+                  <Icons.Calendar size={11} color="rgba(255,255,255,0.35)" />
+                  <span>{formatNewsDate(item.date)}</span>
+                </div>
+              </div>
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+// ══════════════════════════════════════════════════════════════════════════════
 //  NEXT SHOW SECTION  (IDN Plus → Theater fallback, no duplicates)
 // ══════════════════════════════════════════════════════════════════════════════
 function NextShowSection() {
@@ -737,6 +856,7 @@ function Home() {
         <HeroCarousel />
         <NextShowSection />
         <LiveShowsSection />
+        <NewsSection /> 
         <RecentLiveSection />
       </div>
     </div>
