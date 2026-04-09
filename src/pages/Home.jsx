@@ -387,7 +387,6 @@ function ShowCard({ show, formatDate, formatTime, typeLabelColor }) {
   useEffect(() => {
     if (!show.scheduledAt || show.status === "live") return;
     const target = show.scheduledAt;
-
     const tick = () => {
       const diff = Math.max(0, target - Date.now());
       setCountdown({
@@ -397,171 +396,113 @@ function ShowCard({ show, formatDate, formatTime, typeLabelColor }) {
         secs: Math.floor((diff / 1000) % 60),
       });
     };
-
     tick();
     const iv = setInterval(tick, 1000);
     return () => clearInterval(iv);
   }, [show.scheduledAt, show.status]);
 
   return (
-    <div className="next-show-card">
-      <div className="next-show-inner">
-        {/* Poster */}
-        <div className="next-show-poster">
-          <img
-            src={show.image}
-            alt={show.title}
-            onError={(e) => { e.target.src = DEFAULT_IMG; }}
-          />
-          <div
-            className={`next-show-status-badge ${
-              show.status === "live" ? "live" : "scheduled"
-            }`}
-          >
-            <span className="status-dot"></span>
-            {show.status === "live" ? "LIVE" : "SCHEDULED"}
-          </div>
+    <div className="show-grid-card">
+      {/* Poster */}
+      <div className="show-grid-poster">
+        <img
+          src={show.image}
+          alt={show.title}
+          onError={(e) => { e.target.src = DEFAULT_IMG; }}
+        />
+        <div className={`next-show-status-badge ${show.status === "live" ? "live" : "scheduled"}`}>
+          <span className="status-dot"></span>
+          {show.status === "live" ? "LIVE" : "SCHEDULED"}
         </div>
+      </div>
 
-        {/* Details */}
-        <div className="next-show-details">
-          <h3 className="next-show-name">{show.title}</h3>
+      {/* Info */}
+      <div className="show-grid-info">
+        <h3 className="show-grid-title">{show.title}</h3>
 
-          {/* Badge tipe show */}
-          {show.source === "theater" && show.type && (
-            <span
-              style={{
-                fontSize: "11px",
-                fontWeight: 600,
-                letterSpacing: "0.04em",
-                padding: "3px 10px",
-                borderRadius: "999px",
-                background:
-                  typeLabelColor[show.type]?.bg || "rgba(255,255,255,0.1)",
-                color:
-                  typeLabelColor[show.type]?.color || "rgba(255,255,255,0.7)",
-                display: "inline-block",
-                marginBottom: "8px",
-              }}
-            >
-              {show.type}
-              {show.referenceCode ? ` · ${show.referenceCode}` : ""}
-            </span>
-          )}
+        {show.source === "theater" && show.type && (
+          <span
+            style={{
+              fontSize: "10px",
+              fontWeight: 700,
+              letterSpacing: "0.04em",
+              padding: "2px 8px",
+              borderRadius: "999px",
+              background: typeLabelColor[show.type]?.bg || "rgba(255,255,255,0.1)",
+              color: typeLabelColor[show.type]?.color || "rgba(255,255,255,0.7)",
+              display: "inline-block",
+              marginBottom: "6px",
+            }}
+          >
+            {show.type}{show.referenceCode ? ` · ${show.referenceCode}` : ""}
+          </span>
+        )}
 
-          {show.description && (
-            <p className="next-show-description">{show.description}</p>
-          )}
-
-          {/* Birthday members */}
-          {show.isBirthday && show.birthdayMembers?.length > 0 && (
-            <div
-              style={{
-                display: "flex",
-                gap: "8px",
-                flexWrap: "wrap",
-                margin: "8px 0",
-              }}
-            >
-              {show.birthdayMembers.map((m) => (
-                <div
-                  key={m.name}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: "6px",
-                    background: "rgba(255,255,255,0.07)",
-                    borderRadius: "999px",
-                    padding: "4px 10px 4px 4px",
-                    fontSize: "12px",
-                  }}
-                >
-                  <img
-                    src={m.img_alt || m.img}
-                    alt={m.name}
-                    style={{
-                      width: 24,
-                      height: 24,
-                      borderRadius: "50%",
-                      objectFit: "cover",
-                    }}
-                    onError={(e) => { e.target.style.display = "none"; }}
-                  />
-                  <span style={{ color: "rgba(255,255,255,0.85)" }}>
-                    🎂 {m.name}
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
-
-          {/* Countdown — hanya tampil jika belum lewat & bukan live */}
-          {show.scheduledAt &&
-            show.status !== "live" &&
-            show.scheduledAt > Date.now() && (
-              <div className="next-show-countdown">
-                {[
-                  { val: countdown.days, label: "Hari" },
-                  { val: countdown.hours, label: "Jam" },
-                  { val: countdown.mins, label: "Menit" },
-                  { val: countdown.secs, label: "Detik" },
-                ].map((u, i) => (
-                  <div
-                    key={u.label}
-                    style={{ display: "flex", alignItems: "center" }}
-                  >
-                    {i > 0 && <span className="countdown-separator">:</span>}
-                    <div className="countdown-unit">
-                      <div className="countdown-value">
-                        {String(u.val).padStart(2, "0")}
-                      </div>
-                      <span className="countdown-label">{u.label}</span>
-                    </div>
-                  </div>
-                ))}
+        {/* Birthday members */}
+        {show.isBirthday && show.birthdayMembers?.length > 0 && (
+          <div style={{ display: "flex", gap: "4px", flexWrap: "wrap", marginBottom: "6px" }}>
+            {show.birthdayMembers.map((m) => (
+              <div
+                key={m.name}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "4px",
+                  background: "rgba(255,255,255,0.07)",
+                  borderRadius: "999px",
+                  padding: "2px 8px 2px 2px",
+                  fontSize: "11px",
+                }}
+              >
+                <img
+                  src={m.img_alt || m.img}
+                  alt={m.name}
+                  style={{ width: 18, height: 18, borderRadius: "50%", objectFit: "cover" }}
+                  onError={(e) => { e.target.style.display = "none"; }}
+                />
+                <span style={{ color: "rgba(255,255,255,0.85)" }}>🎂 {m.name}</span>
               </div>
-            )}
+            ))}
+          </div>
+        )}
 
-          {/* Meta info */}
-          <div className="next-show-meta">
-            {show.scheduledAt && (
-              <div className="next-show-meta-item">
-                <div className="meta-icon">
-                  <Icons.Calendar size={15} color="rgba(255,255,255,0.5)" />
-                </div>
-                <div>
-                  <div className="meta-label">Tanggal</div>
-                  <div className="meta-value">{formatDate(show.scheduledAt)}</div>
+        {/* Countdown */}
+        {show.scheduledAt && show.status !== "live" && show.scheduledAt > Date.now() && (
+          <div className="show-grid-countdown">
+            {[
+              { val: countdown.days, label: "H" },
+              { val: countdown.hours, label: "J" },
+              { val: countdown.mins, label: "M" },
+              { val: countdown.secs, label: "D" },
+            ].map((u, i) => (
+              <div key={u.label} style={{ display: "flex", alignItems: "center" }}>
+                {i > 0 && <span className="countdown-separator" style={{ fontSize: "14px", padding: "0 1px" }}>:</span>}
+                <div className="show-grid-countdown-unit">
+                  <div className="show-grid-countdown-value">{String(u.val).padStart(2, "0")}</div>
+                  <span className="show-grid-countdown-label">{u.label}</span>
                 </div>
               </div>
-            )}
+            ))}
+          </div>
+        )}
 
-            <div className="next-show-meta-item">
-              <div className="meta-icon">
-                <Icons.Clock size={15} color="rgba(255,255,255,0.5)" />
-              </div>
-              <div>
-                <div className="meta-label">Waktu</div>
-                <div className="meta-value">{formatTime(show.scheduledAt)}</div>
-              </div>
+        {/* Meta */}
+        <div className="show-grid-meta">
+          {show.scheduledAt && (
+            <div className="show-grid-meta-row">
+              <Icons.Calendar size={12} color="rgba(255,255,255,0.4)" />
+              <span>{formatDate(show.scheduledAt)}</span>
             </div>
-
-            <div className="next-show-meta-item">
-              <div className="meta-icon">
-                <Icons.User size={15} color="rgba(255,255,255,0.5)" />
-              </div>
-              <div>
-                <div className="meta-label">Creator</div>
-                <div className="meta-value">{show.creator}</div>
-              </div>
-            </div>
+          )}
+          <div className="show-grid-meta-row">
+            <Icons.Clock size={12} color="rgba(255,255,255,0.4)" />
+            <span>{formatTime(show.scheduledAt)}</span>
           </div>
         </div>
       </div>
     </div>
   );
 }
-
 // ══════════════════════════════════════════════════════════════════════════════
 //  LIVE SHOWS SECTION
 // ══════════════════════════════════════════════════════════════════════════════
