@@ -224,6 +224,298 @@ function normalizeShow(show, src) {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
+//  APP BANNER SECTION
+// ══════════════════════════════════════════════════════════════════════════════
+const GITHUB_RELEASE_API =
+  "https://api.github.com/repos/JKT48Connect/JKT48Connect-APP/releases/latest";
+
+function AppBannerSection() {
+  const [release, setRelease] = useState(null);
+
+  useEffect(() => {
+    fetch(GITHUB_RELEASE_API)
+      .then((r) => r.json())
+      .then((data) => setRelease(data))
+      .catch((e) => console.error("Error fetching release:", e));
+  }, []);
+
+  const apkAsset = release?.assets?.find((a) =>
+    a.name.endsWith(".apk")
+  );
+
+  const formatSize = (bytes) => {
+    if (!bytes) return "";
+    return (bytes / 1024 / 1024).toFixed(1) + " MB";
+  };
+
+  const formatDate = (dateStr) => {
+    if (!dateStr) return "";
+    return new Date(dateStr).toLocaleDateString("id-ID", {
+      day: "numeric",
+      month: "long",
+      year: "numeric",
+    });
+  };
+
+  // Parse promo code dari body release
+  const promoMatch = release?.body?.match(/`([A-Z0-9]+)`/);
+  const promoCode = promoMatch ? promoMatch[1] : null;
+
+  const features = [
+    {
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <polygon points="23 7 16 12 23 17 23 7" />
+          <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+        </svg>
+      ),
+      title: "Tonton Live Show",
+      desc: "Streaming show JKT48 langsung dari aplikasi maupun website kapan saja.",
+      color: "#DC1F2E",
+    },
+    {
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+          <circle cx="12" cy="7" r="4" />
+        </svg>
+      ),
+      title: "Buat Akun",
+      desc: "Daftar akun untuk akses membership dan nikmati semua fitur premium.",
+      color: "#60a5fa",
+    },
+    {
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="1" y="4" width="22" height="16" rx="2" ry="2" />
+          <line x1="1" y1="10" x2="23" y2="10" />
+        </svg>
+      ),
+      title: "Beli Show & Membership",
+      desc: "Beli tiket show per-show atau membership bulanan langsung dari aplikasi.",
+      color: "#FFD700",
+    },
+    {
+      icon: (
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+          stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z" />
+        </svg>
+      ),
+      title: "Akses Website dengan Membership",
+      desc: "Login akun membership di website untuk menonton tanpa perlu kode show.",
+      color: "#a78bfa",
+    },
+  ];
+
+  const steps = [
+    {
+      num: "1",
+      title: "Download Aplikasi",
+      desc: "Download & install APK JKT48Connect di perangkat Android kamu.",
+    },
+    {
+      num: "2",
+      title: "Buat Akun",
+      desc: "Daftar akun baru untuk mengakses fitur pembelian dan membership.",
+    },
+    {
+      num: "3",
+      title: "Beli Show / Membership",
+      desc: "Buka menu Stream → pilih show → beli per-show. Atau beli membership untuk akses penuh.",
+    },
+    {
+      num: "4",
+      title: "Tonton di Web atau App",
+      desc: "Gunakan code show untuk menonton di website, atau login membership untuk akses langsung.",
+    },
+  ];
+
+  return (
+    <div className="app-banner-section fade-in-up-delay-2">
+      {/* ── Header ── */}
+      <div className="section-header">
+        <div className="section-label">
+          <div className="section-icon app-icon">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+              stroke="#a78bfa" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+              <line x1="12" y1="18" x2="12.01" y2="18" />
+            </svg>
+          </div>
+          <div>
+            <h2 className="section-title">JKT48Connect App</h2>
+            <p className="section-subtitle">
+              Download aplikasi untuk pengalaman terbaik menonton JKT48
+            </p>
+          </div>
+        </div>
+        {release && (
+          <span className="section-badge count-badge">
+            {release.tag_name}
+          </span>
+        )}
+      </div>
+
+      {/* ── Main Banner ── */}
+      <div className="app-banner-card">
+        {/* Left: info app */}
+        <div className="app-banner-left">
+          <div className="app-banner-logo">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none"
+              stroke="#a78bfa" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+              <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+              <line x1="12" y1="18" x2="12.01" y2="18" />
+            </svg>
+          </div>
+
+          <div>
+            <h3 className="app-banner-name">
+              {release?.name || "JKT48Connect App"}
+            </h3>
+            {release && (
+              <p className="app-banner-meta">
+                Dirilis {formatDate(release.published_at)}
+                {apkAsset && ` · ${formatSize(apkAsset.size)}`}
+                {apkAsset && ` · ${apkAsset.download_count} unduhan`}
+              </p>
+            )}
+          </div>
+
+          {/* Promo code jika ada */}
+          {promoCode && (
+            <div className="app-promo-box">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"
+                stroke="#FFD700" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z" />
+                <line x1="7" y1="7" x2="7.01" y2="7" />
+              </svg>
+              <span className="app-promo-label">Kode Promo:</span>
+              <code className="app-promo-code">{promoCode}</code>
+              <span className="app-promo-desc">· Diskon 20% membership</span>
+            </div>
+          )}
+
+          {/* Download button */}
+          {apkAsset ? (
+            <a
+              href={apkAsset.browser_download_url}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="app-download-btn"
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none"
+                stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+                <polyline points="7 10 12 15 17 10" />
+                <line x1="12" y1="15" x2="12" y2="3" />
+              </svg>
+              Download APK {release?.tag_name}
+            </a>
+          ) : (
+            <a
+              href="https://github.com/JKT48Connect/JKT48Connect-APP/releases/latest"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="app-download-btn"
+            >
+              Lihat Rilis Terbaru
+            </a>
+          )}
+
+          <a
+            href="https://github.com/JKT48Connect/JKT48Connect-APP/releases"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="app-changelog-link"
+          >
+            Lihat semua versi →
+          </a>
+        </div>
+
+        {/* Right: features */}
+        <div className="app-banner-right">
+          <p className="app-features-title">Apa yang bisa dilakukan?</p>
+          <div className="app-features-grid">
+            {features.map((f, i) => (
+              <div key={i} className="app-feature-item">
+                <div
+                  className="app-feature-icon"
+                  style={{
+                    background: `${f.color}18`,
+                    border: `1px solid ${f.color}30`,
+                    color: f.color,
+                  }}
+                >
+                  {f.icon}
+                </div>
+                <div>
+                  <h4 className="app-feature-title">{f.title}</h4>
+                  <p className="app-feature-desc">{f.desc}</p>
+                </div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+
+      {/* ── How to Buy ── */}
+      <div className="app-howtobuy">
+        <h3 className="app-howtobuy-title">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none"
+            stroke="#FFD700" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+            <circle cx="12" cy="12" r="10" />
+            <line x1="12" y1="8" x2="12" y2="12" />
+            <line x1="12" y1="16" x2="12.01" y2="16" />
+          </svg>
+          Cara Pembelian Show & Membership
+        </h3>
+        <div className="app-steps">
+          {steps.map((s, i) => (
+            <div key={i} className="app-step">
+              <div className="app-step-num">{s.num}</div>
+              <div className="app-step-connector" />
+              <div className="app-step-content">
+                <h4 className="app-step-title">{s.title}</h4>
+                <p className="app-step-desc">{s.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+
+        {/* Info box */}
+        <div className="app-info-boxes">
+          <div className="app-info-box show-box">
+            <div className="app-info-box-icon">🎭</div>
+            <div>
+              <h4>Beli Show Per-Show</h4>
+              <p>
+                Buka aplikasi → navigasi ke menu <strong>Stream</strong> →
+                pilih show yang diinginkan → lakukan pembelian langsung.
+                Code show bisa digunakan untuk menonton di website maupun aplikasi.
+              </p>
+            </div>
+          </div>
+          <div className="app-info-box member-box">
+            <div className="app-info-box-icon">⭐</div>
+            <div>
+              <h4>Beli Membership</h4>
+              <p>
+                Buat akun terlebih dahulu → beli membership di aplikasi →
+                login akun membership di website untuk menonton semua show
+                <strong> tanpa perlu code</strong>, langsung dari browser.
+              </p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+// ══════════════════════════════════════════════════════════════════════════════
 //  NEWS SECTION
 // ══════════════════════════════════════════════════════════════════════════════
 const NEWS_API = `https://v2.jkt48connect.com/api/jkt48/NEWS?apikey=JKTCONNECT`;
@@ -865,6 +1157,7 @@ function Home() {
         <LiveShowsSection />
         <NewsSection /> 
         <RecentLiveSection />
+        <AppBannerSection />
       </div>
     </div>
   );
