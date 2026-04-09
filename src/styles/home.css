@@ -823,6 +823,12 @@
   animation: fadeInUp 0.5s ease-out 0.2s both;
 }
 
+/* ── Upcoming Shows Grid ─────────────────────────────────────────────────── */
+.upcoming-shows-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
 /* ══════════════════════════════════════════════════════════════
    RESPONSIVE
    ══════════════════════════════════════════════════════════════ */
