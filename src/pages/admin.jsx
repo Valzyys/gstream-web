@@ -6,7 +6,13 @@ const ADMIN_USER        = "JKT48Connect";
 const ADMIN_PASS        = "21082007";
 const API_BASE          = "https://v2.jkt48connect.com/api/jkt48";
 const API_KEY           = "JKTCONNECT";
-const PLAYLIST_POLL_MS  = 3_000; // refresh playlist setiap 15 detik
+const PLAYLIST_POLL_MS  = 3_000;
+
+// ─── Server 2 (Hanabira48) Constants ─────────────────────────────────────────
+const HANABIRA_TOKEN_API  = "https://hanabira48.com/api/stream-token";
+const HANABIRA_STREAM_API = "https://proxy.mediastream48.workers.dev/api/stream/v2/playback";
+const HANABIRA_ORIGIN     = "https://stream.hanabira48.com";
+const HANABIRA_SHOW_ID    = "SH86F5";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -86,6 +92,106 @@ function resolveStreamResponse(data) {
   return { session: {}, streams: [], raw: data };
 }
 
+// ─── Hanabira48 Stream Resolver ───────────────────────────────────────────────
+// Step 1: GET /api/stream-token?showId=SH86F5  → { data: { apiToken, tokenId, secKey, showId } }
+// Step 2: GET proxy/api/stream/v2/playback with headers → response berupa .jpg URL (m3u8 playlist)
+// Step 3: parse m3u8 dari .jpg URL tersebut
+
+async function fetchHanabiraToken(showId = HANABIRA_SHOW_ID) {
+  const res  = await fetch(`${HANABIRA_TOKEN_API}?showId=${encodeURIComponent(showId)}`);
+  const json = await res.json();
+  if (!json.success || !json.data) throw new Error("Hanabira token gagal: " + JSON.stringify(json));
+  return json.data; // { apiToken, tokenId, secKey, showId }
+}
+
+async function fetchHanabiraPlayback(tokenData) {
+  const { apiToken, tokenId, secKey, showId } = tokenData;
+  const res = await fetch(HANABIRA_STREAM_API, {
+    method:  "GET",
+    headers: {
+      "Accept":           "*/*",
+      "Accept-Language":  "en-US,en;q=0.9",
+      "Connection":       "keep-alive",
+      "Origin":           HANABIRA_ORIGIN,
+      "Referer":          HANABIRA_ORIGIN + "/",
+      "x-api-token":      apiToken,
+      "x-sec-key":        secKey,
+      "x-showid":         showId,
+      "x-token-id":       tokenId,
+    },
+  });
+
+  if (!res.ok) throw new Error(`Hanabira playback HTTP ${res.status}`);
+
+  // Response bisa berupa text URL (.jpg), JSON, atau M3U8 langsung
+  const contentType = res.headers.get("content-type") || "";
+  let body;
+
+  if (contentType.includes("application/json")) {
+    body = await res.json();
+  } else {
+    body = await res.text();
+  }
+
+  return body;
+}
+
+// Konvert .jpg URL ke m3u8 streams
+// Output playback API = URL berupa .jpg → itu sebenarnya M3U8 playlist yang di-proxy
+// Kita fetch URL tersebut lalu parse sebagai M3U8
+async function resolveHanabiraStreams(tokenData) {
+  const playbackBody = await fetchHanabiraPlayback(tokenData);
+
+  let m3u8Url = null;
+
+  if (typeof playbackBody === "string") {
+    const trimmed = playbackBody.trim();
+    // Kalau langsung M3U8
+    if (trimmed.startsWith("#EXTM3U")) {
+      const parsed = parseM3U8(trimmed);
+      if (parsed.streams.length) return { streams: parsed.streams, session: parsed.session, tokenData };
+    }
+    // Kalau URL langsung (berakhiran .jpg atau lainnya)
+    if (trimmed.startsWith("http")) {
+      m3u8Url = trimmed;
+    }
+  } else if (typeof playbackBody === "object") {
+    // Coba ambil URL dari berbagai field
+    m3u8Url =
+      playbackBody?.url ||
+      playbackBody?.data?.url ||
+      playbackBody?.stream_url ||
+      playbackBody?.data?.stream_url ||
+      playbackBody?.playback_url ||
+      null;
+
+    // Kalau sudah ada streams langsung
+    if (playbackBody?.streams) {
+      const resolved = resolveStreamResponse(playbackBody);
+      if (resolved.streams.length) return { ...resolved, tokenData };
+    }
+  }
+
+  if (!m3u8Url) throw new Error("Hanabira: tidak bisa menemukan stream URL dari response");
+
+  // Fetch URL .jpg tersebut → sebenarnya M3U8
+  const m3u8Res  = await fetch(m3u8Url);
+  const m3u8Text = await m3u8Res.text();
+
+  if (m3u8Text.trim().startsWith("#EXTM3U")) {
+    const parsed = parseM3U8(m3u8Text);
+    return { streams: parsed.streams, session: parsed.session, tokenData, sourceUrl: m3u8Url };
+  }
+
+  // Fallback: gunakan URL .jpg langsung sebagai stream
+  return {
+    streams: [{ NAME: "default", BANDWIDTH: "0", url: m3u8Url }],
+    session: {},
+    tokenData,
+    sourceUrl: m3u8Url,
+  };
+}
+
 function tsToDate(ts) {
   if (!ts) return null;
   const n = Number(ts);
@@ -117,29 +223,18 @@ function itemMatchesToday(item) {
   });
 }
 
-// ─── HLS Player dengan silent playlist refresh ────────────────────────────────
-//
-// Strategi:
-//   - key={selectedSlug} → player hanya restart kalau show berubah, bukan karena URL berubah
-//   - pollUrl() dipanggil setiap 15 detik di dalam player
-//   - Kalau URL SAMA  → hls.loadSource() ulang → hls.js fetch segmen terbaru, playback lanjut
-//   - Kalau URL BEDA  → simpan currentTime → init ulang hls dengan URL baru → resume
-//   - Tidak ada setState loading/error saat polling → UI tidak berubah sama sekali
-//
+// ─── HLS Player ───────────────────────────────────────────────────────────────
 function HLSPlayer({ src, title, pollUrl }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
   const pollRef  = useRef(null);
-  const srcRef   = useRef(src); // track URL aktif tanpa re-render
+  const srcRef   = useRef(src);
   const [status, setStatus] = useState("loading");
 
-  // ── Init hls.js ────────────────────────────────────────────────────────────
   const initHls = useCallback(async (url, video, resumeTime = 0) => {
     if (!url || !video) return;
-
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
-    // Native HLS (Safari/iOS)
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
       video.src = url;
       if (resumeTime > 0) video.currentTime = resumeTime;
@@ -170,7 +265,6 @@ function HLSPlayer({ src, title, pollUrl }) {
     } catch { setStatus("error"); }
   }, []);
 
-  // ── Mount: init player pertama kali ────────────────────────────────────────
   useEffect(() => {
     if (!src || !videoRef.current) return;
     srcRef.current = src;
@@ -183,35 +277,25 @@ function HLSPlayer({ src, title, pollUrl }) {
     };
   }, [src, initHls]);
 
-  // ── Polling setiap 15 detik — SILENT, tidak ada setState UI ───────────────
   useEffect(() => {
     if (!pollUrl || !src) return;
-
     clearInterval(pollRef.current);
     pollRef.current = setInterval(async () => {
       const video = videoRef.current;
       const hls   = hlsRef.current;
       if (!video || !hls) return;
-
       try {
         const newUrl = await pollUrl();
         if (!newUrl) return;
-
         if (newUrl === srcRef.current) {
-          // URL sama → minta hls.js reload playlist → ambil segmen terbaru
-          // Playback tidak terputus, ini seperti manual tick ke hls internal scheduler
           hls.loadSource(newUrl);
         } else {
-          // URL berubah → simpan posisi → init ulang → resume
           const resumeTime = video.currentTime || 0;
           srcRef.current = newUrl;
           await initHls(newUrl, video, resumeTime);
         }
-      } catch (_) {
-        // Gagal → abaikan, coba lagi 15 detik lagi
-      }
+      } catch (_) {}
     }, PLAYLIST_POLL_MS);
-
     return () => clearInterval(pollRef.current);
   }, [src, pollUrl, initHls]);
 
@@ -253,6 +337,33 @@ function HLSPlayer({ src, title, pollUrl }) {
   );
 }
 
+// ─── Server Badge ─────────────────────────────────────────────────────────────
+function ServerBadge({ server, onChange }) {
+  return (
+    <div className="al-server-toggle">
+      <span className="al-server-label">Server:</span>
+      <div className="al-server-pills">
+        <button
+          className={`al-server-pill ${server === 1 ? "active" : ""}`}
+          onClick={() => onChange(1)}
+        >
+          <span className="al-server-dot s1" />
+          Server 1
+          <em>JKTConnect</em>
+        </button>
+        <button
+          className={`al-server-pill ${server === 2 ? "active" : ""}`}
+          onClick={() => onChange(2)}
+        >
+          <span className="al-server-dot s2" />
+          Server 2
+          <em>Hanabira48</em>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 export default function AdminLive() {
   const navigate = useNavigate();
@@ -269,14 +380,21 @@ export default function AdminLive() {
   const [selectedSlug,  setSelectedSlug]  = useState(null);
   const [selectedShow,  setSelectedShow]  = useState(null);
 
+  // Server selection: 1 = JKTConnect, 2 = Hanabira48
+  const [activeServer,  setActiveServer]  = useState(1);
+
   const [streamData,    setStreamData]    = useState(null);
   const [streamLoading, setStreamLoading] = useState(false);
   const [streamError,   setStreamError]   = useState("");
   const [activeStream,  setActiveStream]  = useState(null);
 
-  // Ref agar pollUrl bisa baca state terbaru tanpa closure stale
+  // Hanabira token state
+  const [hanabiraToken, setHanabiraToken] = useState(null);
+  const hanabiraTokenRef = useRef(null);
+
   const activeStreamRef  = useRef(null);
   const selectedSlugRef  = useRef(null);
+  const activeServerRef  = useRef(1);
 
   // ── Restore session ──────────────────────────────────────────────────────
   useEffect(() => {
@@ -307,7 +425,7 @@ export default function AdminLive() {
 
   useEffect(() => { if (authed) fetchShows(); }, [authed, fetchShows]);
 
-  // ── Fetch stream dari API ─────────────────────────────────────────────────
+  // ── Server 1: Fetch stream dari JKTConnect API ────────────────────────────
   const fetchStreamFromApi = useCallback(async (slug) => {
     const res      = await fetch(`${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`);
     const raw      = await res.json();
@@ -319,31 +437,56 @@ export default function AdminLive() {
     return { streams: resolved.streams, session: resolved.session, sorted };
   }, []);
 
-  // ── pollUrl: dipanggil HLSPlayer setiap 15 detik ─────────────────────────
-  // Mengembalikan URL resolusi aktif terbaru dari API
-  // Tidak ada setState loading → tidak ada UI yang berubah
-  const pollUrl = useCallback(async () => {
+  // ── Server 2: Fetch stream dari Hanabira48 ────────────────────────────────
+  const fetchHanabiraStream = useCallback(async () => {
+    const tokenData = await fetchHanabiraToken(HANABIRA_SHOW_ID);
+    hanabiraTokenRef.current = tokenData;
+    setHanabiraToken(tokenData);
+
+    const result = await resolveHanabiraStreams(tokenData);
+    const sorted = [...result.streams].sort(
+      (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+    );
+    return { streams: result.streams, session: result.session || {}, sorted, tokenData };
+  }, []);
+
+  // ── pollUrl Server 1 ──────────────────────────────────────────────────────
+  const pollUrlServer1 = useCallback(async () => {
     const slug = selectedSlugRef.current;
     if (!slug) return null;
-
     const result = await fetchStreamFromApi(slug);
     if (!result) return null;
-
-    // Cari resolusi yang sama dengan yang sedang ditonton
     const currentName = activeStreamRef.current?.NAME;
     const match = result.streams.find((s) => s.NAME === currentName);
     const target = match || result.sorted[0];
-
-    // Update daftar kualitas di UI secara silent (tidak menyentuh player)
     setStreamData({ streams: result.streams, session: result.session });
-
     return target?.url ?? null;
   }, [fetchStreamFromApi]);
 
-  // ── Initial load saat slug berubah ───────────────────────────────────────
+  // ── pollUrl Server 2 ──────────────────────────────────────────────────────
+  const pollUrlServer2 = useCallback(async () => {
+    if (activeServerRef.current !== 2) return null;
+    try {
+      const result = await fetchHanabiraStream();
+      if (!result) return null;
+      const currentName = activeStreamRef.current?.NAME;
+      const match = result.streams.find((s) => s.NAME === currentName);
+      const target = match || result.sorted[0];
+      setStreamData({ streams: result.streams, session: result.session });
+      return target?.url ?? null;
+    } catch {
+      return null;
+    }
+  }, [fetchHanabiraStream]);
+
+  // pollUrl yang aktif tergantung server
+  const pollUrl = activeServer === 2 ? pollUrlServer2 : pollUrlServer1;
+
+  // ── Load stream saat slug atau server berubah ─────────────────────────────
   useEffect(() => {
-    if (!selectedSlug) return;
+    if (!selectedSlug && activeServer === 1) return;
     selectedSlugRef.current  = selectedSlug;
+    activeServerRef.current  = activeServer;
     activeStreamRef.current  = null;
 
     let cancelled = false;
@@ -353,9 +496,17 @@ export default function AdminLive() {
       setStreamError("");
       setStreamData(null);
       setActiveStream(null);
+      setHanabiraToken(null);
 
       try {
-        const result = await fetchStreamFromApi(selectedSlug);
+        let result;
+        if (activeServer === 2) {
+          result = await fetchHanabiraStream();
+        } else {
+          if (!selectedSlug) { setStreamLoading(false); return; }
+          result = await fetchStreamFromApi(selectedSlug);
+        }
+
         if (cancelled) return;
         if (!result) { setStreamError("Stream URL tidak tersedia."); return; }
 
@@ -363,6 +514,11 @@ export default function AdminLive() {
         activeStreamRef.current = best;
         setStreamData({ streams: result.streams, session: result.session });
         setActiveStream(best);
+
+        if (activeServer === 2 && result.tokenData) {
+          setHanabiraToken(result.tokenData);
+          hanabiraTokenRef.current = result.tokenData;
+        }
       } catch (e) {
         if (!cancelled) setStreamError(e.message);
       } finally {
@@ -372,12 +528,25 @@ export default function AdminLive() {
 
     load();
     return () => { cancelled = true; };
-  }, [selectedSlug, fetchStreamFromApi]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedSlug, activeServer]);
 
   // ── Pilih resolusi manual ─────────────────────────────────────────────────
   const handlePickQuality = (stream) => {
     activeStreamRef.current = stream;
     setActiveStream(stream);
+  };
+
+  // ── Ganti server ──────────────────────────────────────────────────────────
+  const handleServerChange = (serverNum) => {
+    if (serverNum === activeServer) return;
+    setActiveServer(serverNum);
+    activeServerRef.current = serverNum;
+    // Reset stream state, useEffect akan otomatis trigger load
+    setStreamData(null);
+    setActiveStream(null);
+    setStreamError("");
+    setHanabiraToken(null);
   };
 
   // ── Login / Logout ────────────────────────────────────────────────────────
@@ -402,8 +571,10 @@ export default function AdminLive() {
     setShows([]);
     setStreamData(null);
     setSelectedSlug(null);
+    setHanabiraToken(null);
     selectedSlugRef.current = null;
     activeStreamRef.current = null;
+    hanabiraTokenRef.current = null;
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -532,14 +703,15 @@ export default function AdminLive() {
           </aside>
 
           <main className="al-main">
-            {!selectedSlug ? (
+            {!selectedSlug && activeServer === 1 ? (
               <div className="al-no-select">
                 <span style={{ fontSize: 48 }}>📺</span>
                 <p>Pilih show dari daftar untuk mulai streaming</p>
               </div>
             ) : (
               <>
-                {selectedShow && (
+                {/* Meta bar: server 1 pakai show info, server 2 pakai info Hanabira */}
+                {activeServer === 1 && selectedShow && (
                   <div className="al-meta-bar">
                     <img
                       src={selectedShow.creator?.image_url}
@@ -562,11 +734,44 @@ export default function AdminLive() {
                   </div>
                 )}
 
+                {activeServer === 2 && (
+                  <div className="al-meta-bar">
+                    <div className="al-hanabira-icon">🌸</div>
+                    <div>
+                      <h1 className="al-stream-title">Hanabira48 Stream</h1>
+                      <span className="al-stream-sub">
+                        Show ID: <code style={{ fontFamily: "var(--mono)", color: "var(--pink)" }}>{HANABIRA_SHOW_ID}</code>
+                        &nbsp;·&nbsp;
+                        {hanabiraToken ? (
+                          <>
+                            <span className="al-dot live" />
+                            Token aktif
+                          </>
+                        ) : streamLoading ? (
+                          "Mengambil token…"
+                        ) : (
+                          "—"
+                        )}
+                      </span>
+                    </div>
+                    <div className="al-price-badge" style={{ borderColor: "#ff6eb444", color: "#ff6eb4", background: "#ff6eb411" }}>
+                      🌸 SERVER 2
+                    </div>
+                  </div>
+                )}
+
+                {/* Server Toggle */}
+                <ServerBadge server={activeServer} onChange={handleServerChange} />
+
                 <div className="al-player-wrap">
                   {streamLoading && (
                     <div className="al-stream-loading">
                       <div className="al-spin xl" />
-                      <p>Mengambil stream URL…</p>
+                      <p>
+                        {activeServer === 2
+                          ? "Mengambil token Hanabira48 & stream URL…"
+                          : "Mengambil stream URL…"}
+                      </p>
                     </div>
                   )}
                   {!streamLoading && streamError && (
@@ -575,19 +780,34 @@ export default function AdminLive() {
                       <p>{streamError}</p>
                       <button
                         className="al-btn-primary sm"
-                        onClick={() => { const s = selectedSlug; setSelectedSlug(null); setTimeout(() => setSelectedSlug(s), 50); }}
+                        onClick={() => {
+                          if (activeServer === 2) {
+                            // Force re-trigger dengan toggle server
+                            setStreamData(null);
+                            setActiveStream(null);
+                            setStreamError("");
+                            setHanabiraToken(null);
+                            // Trigger ulang dengan dummy state change
+                            setActiveServer(s => s); // tidak akan trigger, pakai cara lain:
+                            const sv = activeServer;
+                            setActiveServer(0);
+                            setTimeout(() => setActiveServer(sv), 50);
+                          } else {
+                            const s = selectedSlug;
+                            setSelectedSlug(null);
+                            setTimeout(() => setSelectedSlug(s), 50);
+                          }
+                        }}
                       >
                         Coba Lagi
                       </button>
                     </div>
                   )}
                   {!streamLoading && !streamError && activeStream?.url && (
-                    // key={selectedSlug} → player hanya di-remount kalau ganti show
-                    // bukan karena activeStream.url berubah akibat polling
                     <HLSPlayer
-                      key={selectedSlug}
+                      key={`${activeServer}-${selectedSlug}`}
                       src={activeStream.url}
-                      title={selectedShow?.title || selectedSlug}
+                      title={activeServer === 2 ? `  ${HANABIRA_SHOW_ID}` : (selectedShow?.title || selectedSlug)}
                       pollUrl={pollUrl}
                     />
                   )}
@@ -595,26 +815,29 @@ export default function AdminLive() {
                     <div className="al-stream-err">
                       <span style={{ fontSize: 36 }}>📭</span>
                       <p>Stream URL tidak tersedia.</p>
-                      <span style={{ color: "#555", fontSize: 12 }}>Status: {selectedShow?.status}</span>
+                      <span style={{ color: "#555", fontSize: 12 }}>
+                        {activeServer === 2 ? "Show ID: " + HANABIRA_SHOW_ID : "Status: " + selectedShow?.status}
+                      </span>
                     </div>
                   )}
                 </div>
 
+                {/* Quality selector */}
                 {streamData?.streams?.length > 0 && (
                   <div className="al-quality-row">
                     <span className="al-quality-label">Kualitas:</span>
                     {[...streamData.streams]
                       .sort((a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0))
                       .map((s) => {
-                        const isActive = activeStream?.NAME === s.NAME;
+                        const isQActive = activeStream?.NAME === s.NAME || activeStream?.url === s.url;
                         return (
                           <button
-                            key={s["GROUP-ID"] || s.NAME}
-                            className={`al-quality-chip ${isActive ? "active" : ""}`}
+                            key={s["GROUP-ID"] || s.NAME || s.url}
+                            className={`al-quality-chip ${isQActive ? "active" : ""}`}
                             onClick={() => handlePickQuality(s)}
                             title={`${s.RESOLUTION || ""} · ${Math.round(Number(s.BANDWIDTH || 0) / 1000)}kbps`}
                           >
-                            {s.NAME}
+                            {s.NAME || "default"}
                             {s.RESOLUTION && <em> {s.RESOLUTION}</em>}
                           </button>
                         );
@@ -622,6 +845,7 @@ export default function AdminLive() {
                   </div>
                 )}
 
+                {/* Session info */}
                 {streamData?.session && Object.keys(streamData.session).length > 0 && (
                   <div className="al-session-row">
                     {["BROADCAST-ID", "VIDEO-SESSION-ID", "STREAM-TIME", "CLUSTER", "USER-COUNTRY"].map((key) =>
@@ -634,24 +858,74 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                <div className="al-slug-row">
-                  <span className="al-slug-label">Slug:</span>
-                  <code className="al-slug-code">{selectedSlug}</code>
-                  <button
-                    className="al-btn-ghost sm"
-                    onClick={() => navigator.clipboard?.writeText(selectedSlug)}
-                    title="Copy slug"
-                  >
-                    📋
-                  </button>
-                </div>
+                {/* Hanabira token info */}
+                {activeServer === 2 && hanabiraToken && (
+                  <div className="al-hanabira-info">
+                    <div className="al-hanabira-info-title">🌸 Token Info</div>
+                    <div className="al-hanabira-chips">
+                      <span className="al-hanabira-chip">
+                        <em>Show ID:</em> {hanabiraToken.showId}
+                      </span>
+                      <span className="al-hanabira-chip">
+                        <em>Token ID:</em> {hanabiraToken.tokenId?.slice(0, 8)}…
+                      </span>
+                      <span className="al-hanabira-chip">
+                        <em>Sec Key:</em> {hanabiraToken.secKey?.slice(0, 8)}…
+                      </span>
+                    </div>
+                  </div>
+                )}
 
-                {selectedShow?.idnliveplus?.description && (
+                {/* Slug row (server 1 only) */}
+                {activeServer === 1 && selectedSlug && (
+                  <div className="al-slug-row">
+                    <span className="al-slug-label">Slug:</span>
+                    <code className="al-slug-code">{selectedSlug}</code>
+                    <button
+                      className="al-btn-ghost sm"
+                      onClick={() => navigator.clipboard?.writeText(selectedSlug)}
+                      title="Copy slug"
+                    >
+                      📋
+                    </button>
+                  </div>
+                )}
+
+                {activeServer === 1 && selectedShow?.idnliveplus?.description && (
                   <div className="al-desc">
                     <h4>Deskripsi</h4>
                     <p>{selectedShow.idnliveplus.description}</p>
                   </div>
                 )}
+              </>
+            )}
+
+            {/* Server 2 tanpa show selected di server 1 */}
+            {activeServer === 2 && !selectedSlug && (
+              <>
+                <ServerBadge server={activeServer} onChange={handleServerChange} />
+                <div className="al-player-wrap">
+                  {streamLoading && (
+                    <div className="al-stream-loading">
+                      <div className="al-spin xl" />
+                      <p>Mengambil token & stream URL…</p>
+                    </div>
+                  )}
+                  {!streamLoading && streamError && (
+                    <div className="al-stream-err">
+                      <span style={{ fontSize: 36 }}>⚠️</span>
+                      <p>{streamError}</p>
+                    </div>
+                  )}
+                  {!streamLoading && !streamError && activeStream?.url && (
+                    <HLSPlayer
+                      key={`server2-noshow`}
+                      src={activeStream.url}
+                      title={`Hanabira48 - ${HANABIRA_SHOW_ID}`}
+                      pollUrl={pollUrl}
+                    />
+                  )}
+                </div>
               </>
             )}
           </main>
@@ -671,6 +945,9 @@ const globalStyles = `
     --red:     #DC1F2E;
     --red-dim: #DC1F2E22;
     --red-mid: #DC1F2E55;
+    --pink:    #ff6eb4;
+    --pink-dim:#ff6eb411;
+    --pink-mid:#ff6eb444;
     --bg:      #080808;
     --bg2:     #111111;
     --bg3:     #181818;
@@ -688,6 +965,7 @@ const globalStyles = `
   @keyframes fadeIn  { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
   @keyframes pulse   { 0%,100% { opacity:1 } 50% { opacity:.4 } }
   @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+  @keyframes pinkPulse { 0%,100% { box-shadow: 0 0 0 0 #ff6eb433; } 50% { box-shadow: 0 0 0 6px #ff6eb400; } }
 
   .al-noise { pointer-events: none; position: fixed; inset: 0; z-index: 0; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"); background-size: 200px; opacity: .5; }
 
@@ -758,6 +1036,7 @@ const globalStyles = `
 
   .al-meta-bar { display: flex; align-items: center; gap: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
   .al-creator-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid var(--line); }
+  .al-hanabira-icon { width: 44px; height: 44px; border-radius: 50%; background: var(--pink-dim); border: 2px solid var(--pink-mid); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; animation: pinkPulse 2s infinite; }
   .al-stream-title { font-family: var(--display); font-size: 16px; font-weight: 800; color: var(--txt); line-height: 1.2; }
   .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
   .al-price-badge { margin-left: auto; flex-shrink: 0; background: #f59e0b22; border: 1px solid #f59e0b44; color: #f59e0b; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; font-family: var(--mono); }
@@ -785,11 +1064,36 @@ const globalStyles = `
   .al-desc h4 { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--txt3); text-transform: uppercase; margin-bottom: 8px; }
   .al-desc p { font-size: 13px; color: var(--txt2); line-height: 1.7; white-space: pre-line; }
 
+  /* ── Server Toggle ─────────────────────────────────────────────────────── */
+  .al-server-toggle { display: flex; align-items: center; gap: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; }
+  .al-server-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; font-family: var(--mono); flex-shrink: 0; }
+  .al-server-pills { display: flex; gap: 8px; flex-wrap: wrap; }
+  .al-server-pill { display: flex; align-items: center; gap: 7px; background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 20px; cursor: pointer; transition: all .2s; font-family: var(--sans); position: relative; overflow: hidden; }
+  .al-server-pill em { font-style: normal; font-size: 10px; color: var(--txt3); font-family: var(--mono); margin-left: 2px; }
+  .al-server-pill:hover { border-color: var(--txt3); color: var(--txt); }
+  .al-server-pill.active { color: var(--txt); font-weight: 700; }
+  .al-server-pill:nth-child(1).active { border-color: var(--red-mid); background: var(--red-dim); }
+  .al-server-pill:nth-child(1).active em { color: var(--red); }
+  .al-server-pill:nth-child(2).active { border-color: var(--pink-mid); background: var(--pink-dim); }
+  .al-server-pill:nth-child(2).active em { color: var(--pink); }
+
+  .al-server-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .al-server-dot.s1 { background: var(--red); }
+  .al-server-dot.s2 { background: var(--pink); }
+
+  /* ── Hanabira info ─────────────────────────────────────────────────────── */
+  .al-hanabira-info { background: var(--pink-dim); border: 1px solid var(--pink-mid); border-radius: 10px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
+  .al-hanabira-info-title { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--pink); text-transform: uppercase; }
+  .al-hanabira-chips { display: flex; gap: 8px; flex-wrap: wrap; }
+  .al-hanabira-chip { background: #00000033; border: 1px solid var(--pink-mid); color: var(--txt2); font-size: 10px; padding: 2px 10px; border-radius: 4px; font-family: var(--mono); }
+  .al-hanabira-chip em { color: var(--pink); font-style: normal; margin-right: 4px; opacity: .7; }
+
   @media (max-width: 768px) {
     .al-content { flex-direction: column; }
     .al-sidebar { width: 100%; position: static; max-height: 280px; border-right: none; border-bottom: 1px solid var(--line); }
     .al-today { display: none; }
     .al-show-list { flex-direction: row; overflow-x: auto; padding-bottom: 4px; }
     .al-show-card { min-width: 200px; }
+    .al-server-toggle { flex-wrap: wrap; }
   }
 `;
