@@ -13,16 +13,14 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
-// ── Deteksi apakah param adalah slug (bukan Mux playback ID) ─────────────────
-// Mux playback ID biasanya pendek & alphanumeric tanpa banyak tanda "-"
-// Slug format: "judul-show-YYYY-MM-DD-xxxxx"
-const isSlug = (param) => {
+// ── Deteksi slug vs Mux playback ID ──────────────────────────────────────────
+// Slug mengandung tanggal format YYYY-MM-DD
+const isSlugParam = (param) => {
   if (!param) return false;
-  // Slug biasanya mengandung tanggal format YYYY-MM-DD
   return /\d{4}-\d{2}-\d{2}/.test(param);
 };
 
-// ── HLS Player Component ──────────────────────────────────────────────────────
+// ── HLS Player (untuk slug mode) ─────────────────────────────────────────────
 function HlsPlayer({ src, title }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
@@ -31,39 +29,50 @@ function HlsPlayer({ src, title }) {
     const video = videoRef.current;
     if (!video || !src) return;
 
-    if (Hls.isSupported()) {
-      const hls = new Hls({
-        enableWorker: true,
-        lowLatencyMode: true,
-      });
-      hlsRef.current = hls;
-      hls.loadSource(src);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        video.play().catch(() => {});
-      });
-      hls.on(Hls.Events.ERROR, (_, data) => {
-        if (data.fatal) {
-          switch (data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              hls.startLoad();
-              break;
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              hls.recoverMediaError();
-              break;
-            default:
-              hls.destroy();
-              break;
+    const setupHls = () => {
+      if (hlsRef.current) {
+        hlsRef.current.destroy();
+        hlsRef.current = null;
+      }
+
+      if (Hls.isSupported()) {
+        const hls = new Hls({
+          enableWorker:    true,
+          lowLatencyMode:  true,
+          liveSyncDuration: 3,
+          liveMaxLatencyDuration: 10,
+        });
+        hlsRef.current = hls;
+        hls.loadSource(src);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          video.play().catch(() => {});
+        });
+        hls.on(Hls.Events.ERROR, (_, data) => {
+          if (data.fatal) {
+            switch (data.type) {
+              case Hls.ErrorTypes.NETWORK_ERROR:
+                hls.startLoad();
+                break;
+              case Hls.ErrorTypes.MEDIA_ERROR:
+                hls.recoverMediaError();
+                break;
+              default:
+                hls.destroy();
+                break;
+            }
           }
-        }
-      });
-    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari native HLS
-      video.src = src;
-      video.addEventListener("loadedmetadata", () => {
-        video.play().catch(() => {});
-      });
-    }
+        });
+      } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        // Safari native HLS
+        video.src = src;
+        video.addEventListener("loadedmetadata", () => {
+          video.play().catch(() => {});
+        });
+      }
+    };
+
+    setupHls();
 
     return () => {
       if (hlsRef.current) {
@@ -79,13 +88,13 @@ function HlsPlayer({ src, title }) {
       controls
       autoPlay
       playsInline
-      style={{ width: "100%", height: "100%", background: "#000" }}
+      style={{ width: "100%", height: "100%", background: "#000", borderRadius: "8px" }}
       title={title}
     />
   );
 }
 
-/** Ambil session login dari sessionStorage / localStorage */
+/** Ambil session login */
 const getSession = () => {
   try {
     const d = JSON.parse(
@@ -103,9 +112,9 @@ function LiveStream() {
   const navigate       = useNavigate();
 
   // ── Auth / membership state ───────────────────────────────────────────────
-  const [membershipChecked,  setMembershipChecked]  = useState(false);
-  const [hasMonthlymember,   setHasMonthlyMember]   = useState(false);
-  const [membershipLoading,  setMembershipLoading]  = useState(true);
+  const [membershipChecked, setMembershipChecked] = useState(false);
+  const [hasMonthlymember,  setHasMonthlyMember]  = useState(false);
+  const [membershipLoading, setMembershipLoading] = useState(true);
 
   // ── Verification state ────────────────────────────────────────────────────
   const [isVerified,        setIsVerified]        = useState(false);
@@ -123,11 +132,11 @@ function LiveStream() {
   const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
-  // ── Slug stream state ─────────────────────────────────────────────────────
-  const [hlsUrl,    setHlsUrl]    = useState("");   // stream_url dari slug API
+  // ── Slug / HLS state ──────────────────────────────────────────────────────
+  const [hlsUrl,     setHlsUrl]     = useState("");
   const [isSlugMode, setIsSlugMode] = useState(false);
 
-  // ── CHAT STATE ────────────────────────────────────────────────────────────
+  // ── Chat state ────────────────────────────────────────────────────────────
   const [chatMessages,    setChatMessages]    = useState([]);
   const [chatInput,       setChatInput]       = useState("");
   const [chatUser,        setChatUser]        = useState(null);
@@ -145,183 +154,114 @@ function LiveStream() {
     } catch { return "unknown"; }
   };
 
-  // ── Step 1: Cek membership ────────────────────────────────────────────────
+  // ── Cek membership ────────────────────────────────────────────────────────
   const checkMembership = useCallback(async () => {
     setMembershipLoading(true);
     const session = getSession();
-
     if (!session) {
-      setHasMonthlyMember(false);
-      setMembershipChecked(true);
-      setMembershipLoading(false);
+      setHasMonthlyMember(false); setMembershipChecked(true); setMembershipLoading(false);
       return false;
     }
-
     const uid   = session.user?.user_id;
     const token = session.token;
-
     if (!uid || !token) {
-      setHasMonthlyMember(false);
-      setMembershipChecked(true);
-      setMembershipLoading(false);
+      setHasMonthlyMember(false); setMembershipChecked(true); setMembershipLoading(false);
       return false;
     }
-
     try {
       const res  = await fetch(
         `${API_BASE}/membership/status/${uid}?apikey=${API_KEY}`,
         { headers: { Authorization: `Bearer ${token}` } }
       );
       const data = await res.json();
-
-      if (
-        data.status &&
-        data.data?.is_active &&
-        data.data?.membership_type === "monthly"
-      ) {
-        setHasMonthlyMember(true);
-        setMembershipChecked(true);
-        setMembershipLoading(false);
+      if (data.status && data.data?.is_active && data.data?.membership_type === "monthly") {
+        setHasMonthlyMember(true); setMembershipChecked(true); setMembershipLoading(false);
         return true;
       }
-    } catch (e) {
-      console.error("Error checking membership:", e);
-    }
-
-    setHasMonthlyMember(false);
-    setMembershipChecked(true);
-    setMembershipLoading(false);
+    } catch (e) { console.error("Error checking membership:", e); }
+    setHasMonthlyMember(false); setMembershipChecked(true); setMembershipLoading(false);
     return false;
   }, []);
 
-  // ── Verification logic ────────────────────────────────────────────────────
+  // ── Verification ──────────────────────────────────────────────────────────
   const verifyAccess = async () => {
     if (!verificationData.email || !verificationData.code) {
-      setVerificationError("Email dan code wajib diisi");
-      return;
+      setVerificationError("Email dan code wajib diisi"); return;
     }
-    setVerifying(true);
-    setVerificationError("");
-
+    setVerifying(true); setVerificationError("");
     try {
       const ip = clientIP || (await fetchClientIP());
-
-      const verifyResponse = await fetch(
-        "https://v2.jkt48connect.com/api/codes/verify",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            email:  verificationData.email,
-            code:   verificationData.code,
-            apikey: "JKTCONNECT",
-          }),
-        }
-      );
+      const verifyResponse = await fetch("https://v2.jkt48connect.com/api/codes/verify", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationData.email, code: verificationData.code, apikey: "JKTCONNECT" }),
+      });
       const verifyData = await verifyResponse.json();
-
       if (!verifyData.status) {
         setVerificationError(verifyData.message || "Code tidak valid atau sudah kedaluwarsa");
-        setVerifying(false);
-        return;
+        setVerifying(false); return;
       }
-
-      const codeData          = verifyData.data;
+      const codeData = verifyData.data;
       if (!codeData.is_active) {
-        setVerificationError("Code ini sudah tidak aktif");
-        setVerifying(false);
-        return;
+        setVerificationError("Code ini sudah tidak aktif"); setVerifying(false); return;
       }
-
       const usageCount        = parseInt(codeData.usage_count) || 0;
       const usageLimit        = parseInt(codeData.usage_limit)  || 1;
       const hasUsageRemaining = usageCount < usageLimit;
-
       if (codeData.is_used && !hasUsageRemaining) {
         const listResponse = await fetch(
           `https://v2.jkt48connect.com/api/codes/list?email=${verificationData.email}&apikey=JKTCONNECT`
         );
         const listData = await listResponse.json();
-
         if (listData.status && listData.data.wotatokens) {
-          const userCode = listData.data.wotatokens.find(
-            (c) => c.code === verificationData.code
-          );
+          const userCode = listData.data.wotatokens.find((c) => c.code === verificationData.code);
           if (userCode) {
             if (userCode.ip_address && userCode.ip_address !== "" && userCode.ip_address !== ip) {
               setVerificationError("Code ini sudah digunakan dari IP address yang berbeda");
-              setVerifying(false);
-              return;
+              setVerifying(false); return;
             }
-            const sessionData = { email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true };
-            localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-            setIsVerified(true);
-            setShowVerification(false);
-            setVerifying(false);
-            return;
+            localStorage.setItem("stream_verification", JSON.stringify({ email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true }));
+            setIsVerified(true); setShowVerification(false); setVerifying(false); return;
           }
         }
-        setVerificationError("Code sudah tidak dapat digunakan");
-        setVerifying(false);
-        return;
+        setVerificationError("Code sudah tidak dapat digunakan"); setVerifying(false); return;
       }
-
-      const useResponse = await fetch(
-        "https://v2.jkt48connect.com/api/codes/use",
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: verificationData.email, code: verificationData.code, apikey: "JKTCONNECT" }),
-        }
-      );
+      const useResponse = await fetch("https://v2.jkt48connect.com/api/codes/use", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: verificationData.email, code: verificationData.code, apikey: "JKTCONNECT" }),
+      });
       const useData = await useResponse.json();
-
       if (useData.status) {
-        const sessionData = { email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true };
-        localStorage.setItem("stream_verification", JSON.stringify(sessionData));
-        setIsVerified(true);
-        setShowVerification(false);
-        setVerifying(false);
+        localStorage.setItem("stream_verification", JSON.stringify({ email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true }));
+        setIsVerified(true); setShowVerification(false); setVerifying(false);
       } else {
-        setVerificationError(useData.message || "Gagal menggunakan code");
-        setVerifying(false);
+        setVerificationError(useData.message || "Gagal menggunakan code"); setVerifying(false);
       }
     } catch {
-      setVerificationError("Terjadi kesalahan saat verifikasi. Silakan coba lagi.");
-      setVerifying(false);
+      setVerificationError("Terjadi kesalahan saat verifikasi. Silakan coba lagi."); setVerifying(false);
     }
   };
 
   const checkExistingVerification = async () => {
     const stored = localStorage.getItem("stream_verification");
     if (!stored) { setShowVerification(true); return false; }
-
     try {
       const info = JSON.parse(stored);
       if (!info.verified || !info.timestamp) {
-        localStorage.removeItem("stream_verification");
-        setShowVerification(true);
-        return false;
+        localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
       }
       const hoursDiff = (Date.now() - info.timestamp) / (1000 * 60 * 60);
       if (hoursDiff > 5) {
-        localStorage.removeItem("stream_verification");
-        setShowVerification(true);
-        return false;
+        localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
       }
       const ip = await fetchClientIP();
-      if (info.ip !== ip) {
-        info.ip = ip;
-        localStorage.setItem("stream_verification", JSON.stringify(info));
-      }
-      setIsVerified(true);
-      setShowVerification(false);
+      if (info.ip !== ip) { info.ip = ip; localStorage.setItem("stream_verification", JSON.stringify(info)); }
+      setIsVerified(true); setShowVerification(false);
       setVerificationData({ email: info.email, code: info.code });
       return true;
     } catch {
-      localStorage.removeItem("stream_verification");
-      setShowVerification(true);
-      return false;
+      localStorage.removeItem("stream_verification"); setShowVerification(true); return false;
     }
   };
 
@@ -332,8 +272,7 @@ function LiveStream() {
       const data = await res.json();
       if (data.theater?.length > 0) {
         const now = new Date();
-        let nearestShow = null;
-        let smallestDiff = Infinity;
+        let nearestShow = null, smallestDiff = Infinity;
         data.theater.forEach((show) => {
           const diff = Math.abs(new Date(show.date) - now);
           if (diff < smallestDiff) { smallestDiff = diff; nearestShow = show; }
@@ -350,40 +289,49 @@ function LiveStream() {
       const res  = await fetch(`https://v2.jkt48connect.com/api/jkt48/theater/${showId}?apikey=JKTCONNECT`);
       const data = await res.json();
       if (data.shows?.[0]?.members) setMembers(data.shows[0].members);
-      setLoadingMembers(false);
-    } catch { setLoadingMembers(false); }
+    } catch {}
+    setLoadingMembers(false);
   };
 
-  // ── Fetch slug stream URL ─────────────────────────────────────────────────
+  // ── KEY FIX: Fetch stream dari slug API yang benar ────────────────────────
   const fetchSlugStream = async (slug) => {
     try {
+      // Endpoint yang benar sesuai instruksi user
       const res  = await fetch(
-        `https://v2.jkt48connect.com/api/jkt48connect/live/stream/${slug}?apikey=${API_KEY}`
+        `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${slug}`
       );
       const data = await res.json();
+
+      // Ambil stream_url (resolusi tertinggi / default)
       if (data.success && data.stream_url) {
-        return data.stream_url;
+        return { url: data.stream_url, title: data.slug || slug };
       }
-      // Fallback: ambil url resolusi tertinggi dari streams[]
-      if (data.success && data.streams?.length > 0) {
+
+      // Fallback: pilih stream dengan bandwidth tertinggi dari streams[]
+      if (data.success && Array.isArray(data.streams) && data.streams.length > 0) {
         const best = data.streams.reduce((prev, curr) =>
-          parseInt(curr.BANDWIDTH) > parseInt(prev.BANDWIDTH) ? curr : prev
+          parseInt(curr.BANDWIDTH || 0) > parseInt(prev.BANDWIDTH || 0) ? curr : prev
         );
-        return best.url;
+        return { url: best.url, title: data.slug || slug };
       }
+
       return null;
-    } catch { return null; }
+    } catch (e) {
+      console.error("fetchSlugStream error:", e);
+      return null;
+    }
   };
 
   // ── Load stream data ──────────────────────────────────────────────────────
-  const loadStreamData = async () => {
+  const loadStreamData = useCallback(async () => {
     try {
       setLoading(true);
       if (!playbackId) { setError("Playback ID tidak ditemukan"); setLoading(false); return; }
 
-      const slugMode = isSlug(playbackId);
+      const slugMode = isSlugParam(playbackId);
       setIsSlugMode(slugMode);
 
+      // Fetch show info & lineup
       const nearestShow = await fetchNearestShow();
       if (nearestShow) {
         setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
@@ -391,24 +339,24 @@ function LiveStream() {
       }
 
       if (slugMode) {
-        // Gunakan slug API untuk dapat HLS URL
-        const url = await fetchSlugStream(playbackId);
-        if (!url) {
-          setError("Gagal mendapatkan stream URL dari slug.");
+        // ── SLUG MODE: fetch HLS URL dari API slug ──
+        const result = await fetchSlugStream(playbackId);
+        if (!result || !result.url) {
+          setError("Gagal mendapatkan stream URL. Stream mungkin sudah berakhir.");
           setLoading(false);
           return;
         }
-        setHlsUrl(url);
+        setHlsUrl(result.url);
         setStreamData({
           playbackId,
-          title:    nearestShow ? nearestShow.title : "Live Stream JKT48",
+          title:    nearestShow?.title || result.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
       } else {
-        // Mux playback ID — pakai MuxPlayer seperti semula
+        // ── MUX MODE: playbackId langsung ke MuxPlayer ──
         setStreamData({
           playbackId,
-          title:    nearestShow ? nearestShow.title : "Live Stream JKT48",
+          title:    nearestShow?.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
       }
@@ -418,7 +366,7 @@ function LiveStream() {
       setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
       setLoading(false);
     }
-  };
+  }, [playbackId]);
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -426,13 +374,12 @@ function LiveStream() {
       await fetchClientIP();
       const hasMonthly = await checkMembership();
       if (hasMonthly) {
-        setIsVerified(true);
-        setShowVerification(false);
-        loadStreamData();
+        setIsVerified(true); setShowVerification(false);
+        await loadStreamData();
       } else {
         const verified = await checkExistingVerification();
         if (verified) {
-          loadStreamData();
+          await loadStreamData();
         } else {
           setLoading(false);
         }
@@ -440,7 +387,7 @@ function LiveStream() {
     };
     init();
 
-    // --- AUTO LOGIN CHAT ---
+    // ── Auto login chat ──
     const initChatUser = async () => {
       setIsChatLoggingIn(true);
       let userData = null;
@@ -449,29 +396,19 @@ function LiveStream() {
         if (rawData) {
           const parsed = JSON.parse(rawData);
           if (parsed?.isLoggedIn && parsed?.token && parsed?.user?.user_id) {
-            const uid   = parsed.user.user_id;
-            const token = parsed.token;
             try {
               const res = await fetch(
-                `${API_BASE}/profile/${uid}?apikey=${API_KEY}`,
-                { headers: { Authorization: `Bearer ${token}` } }
+                `${API_BASE}/profile/${parsed.user.user_id}?apikey=${API_KEY}`,
+                { headers: { Authorization: `Bearer ${parsed.token}` } }
               );
               const profileData = await res.json();
-              if (profileData.status && profileData.data) {
-                userData = profileData.data;
-              } else {
-                userData = parsed.user;
-              }
-            } catch {
-              userData = parsed.user;
-            }
+              userData = profileData.status && profileData.data ? profileData.data : parsed.user;
+            } catch { userData = parsed.user; }
           } else {
             userData = parsed?.user || parsed;
           }
         }
-      } catch (e) {
-        console.error("Error parsing user session", e);
-      }
+      } catch (e) { console.error("Error parsing user session", e); }
 
       if (userData && (userData.username || userData.full_name)) {
         const username   = userData.username || userData.full_name;
@@ -479,103 +416,81 @@ function LiveStream() {
         const avatar_url = userData.avatar
           ? userData.avatar
           : `https://ui-avatars.com/api/?name=${encodeURIComponent(username)}&background=7b1c1c&color=fff`;
-
         try {
           await fetch(`${API_BASE}/chatstream/register?apikey=${API_KEY}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ username: username.toLowerCase(), email, avatar_url }),
           });
-
           const { data: supabaseUser, error } = await supabase
             .from("dashboard_v2_users")
             .select("id, username, avatar_url, role, bluetick")
             .eq("username", username.toLowerCase())
             .single();
-
           if (!error && supabaseUser) {
             setChatUser({ ...supabaseUser, avatar_url });
           } else {
             setChatUser({ id: userData.user_id || username, username: username.toLowerCase(), avatar_url, role: "member", bluetick: false });
           }
-        } catch (e) {
-          console.error("Gagal auto register/login chat", e);
-        }
+        } catch (e) { console.error("Gagal auto register/login chat", e); }
       }
       setIsChatLoggingIn(false);
     };
     initChatUser();
 
-    // --- SUPABASE REALTIME ---
+    // ── Supabase Realtime ──
     const channel = supabase.channel(`chat-${playbackId}`, {
       config: { broadcast: { ack: true } },
     });
     channel
-      .on("broadcast", { event: "pesan_baru" }, (response) => {
-        const payload = response.payload;
+      .on("broadcast", { event: "pesan_baru" }, ({ payload }) => {
         setChatMessages((prev) => {
-          const isExist = prev.some(msg => msg.timestamp === payload.timestamp && msg.username === payload.username);
-          if (isExist) return prev;
-          return [...prev, payload];
+          const exists = prev.some(m => m.timestamp === payload.timestamp && m.username === payload.username);
+          return exists ? prev : [...prev, payload];
         });
       })
       .subscribe();
     channelRef.current = channel;
-
     return () => { supabase.removeChannel(channel); };
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
-    if (isVerified && !streamData && membershipChecked) {
-      loadStreamData();
-    }
+    if (isVerified && !streamData && membershipChecked) loadStreamData();
   }, [isVerified, membershipChecked]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  // ── UI Handlers ───────────────────────────────────────────────────────────
-  const handleInputChange = (e) => {
+  // ── Handlers ──────────────────────────────────────────────────────────────
+  const handleInputChange        = (e) => {
     const { name, value } = e.target;
     setVerificationData((prev) => ({ ...prev, [name]: value }));
     setVerificationError("");
   };
-
   const handleVerificationSubmit = (e) => { e.preventDefault(); verifyAccess(); };
-  const goBack = () => navigate(-1);
-
-  const handleLogout = () => {
+  const goBack                   = () => navigate(-1);
+  const handleLogout             = () => {
     localStorage.removeItem("stream_verification");
-    setIsVerified(false);
-    setShowVerification(true);
-    setStreamData(null);
-    setHlsUrl("");
+    setIsVerified(false); setShowVerification(true);
+    setStreamData(null); setHlsUrl("");
     setVerificationData({ email: "", code: "" });
   };
-
   const handleSendMessage = async (e) => {
     e.preventDefault();
     if (!chatInput.trim() || !chatUser) return;
-
     const payload = {
       user_id:      chatUser.id,
       username:     chatUser.username,
-      avatar_url:   chatUser.avatar_url || "https://ui-avatars.com/api/?name=" + chatUser.username,
+      avatar_url:   chatUser.avatar_url || `https://ui-avatars.com/api/?name=${chatUser.username}`,
       bluetick:     chatUser.bluetick,
       role:         chatUser.role,
       text_content: chatInput.trim(),
       timestamp:    new Date().toISOString(),
     };
-
     setChatMessages((prev) => [...prev, payload]);
     setChatInput("");
-
-    await channelRef.current.send({
-      type:    "broadcast",
-      event:   "pesan_baru",
-      payload: payload,
-    });
+    await channelRef.current.send({ type: "broadcast", event: "pesan_baru", payload });
   };
 
   // ══════════════════════════════════════════════════════════════════════════
@@ -611,11 +526,10 @@ function LiveStream() {
                 <input type="text" name="code" value={verificationData.code} onChange={handleInputChange} placeholder="Masukkan code" required />
               </div>
               {verificationError && <div className="error-message">{verificationError}</div>}
-              {verifying ? (
-                <button type="button" className="verify-button" disabled><span className="spinner"></span> Memverifikasi...</button>
-              ) : (
-                <button type="submit" className="verify-button">✓ Verifikasi Akses</button>
-              )}
+              {verifying
+                ? <button type="button" className="verify-button" disabled><span className="spinner"></span> Memverifikasi...</button>
+                : <button type="submit" className="verify-button">✓ Verifikasi Akses</button>
+              }
             </form>
             <div className="verification-info">
               <p>!<strong>Informasi:</strong></p>
@@ -669,11 +583,7 @@ function LiveStream() {
       {/* Header */}
       <div className="stream-header">
         <button onClick={goBack} className="back-btn">← Kembali</button>
-        {showInfo && (
-          <div className="show-title">
-            <span>{showInfo.title}</span>
-          </div>
-        )}
+        {showInfo && <div className="show-title"><span>{showInfo.title}</span></div>}
         {!hasMonthlymember && (
           <button onClick={handleLogout} className="logout-btn">Logout</button>
         )}
@@ -690,10 +600,8 @@ function LiveStream() {
         <div className="main-content">
           <div className="player-container">
             {isSlugMode && hlsUrl ? (
-              // Slug mode → HLS.js player
               <HlsPlayer src={hlsUrl} title={streamData.title} />
             ) : (
-              // Mux mode → MuxPlayer
               <MuxPlayer
                 streamType="live"
                 playbackId={streamData.playbackId}
@@ -710,10 +618,7 @@ function LiveStream() {
                 <span className="member-count">{members.length} Member</span>
               </div>
               {loadingMembers ? (
-                <div className="members-loading">
-                  <div className="spinner"></div>
-                  <p>Memuat lineup...</p>
-                </div>
+                <div className="members-loading"><div className="spinner"></div><p>Memuat lineup...</p></div>
               ) : (
                 <div className="members-grid">
                   {members.map((member) => (
@@ -727,12 +632,10 @@ function LiveStream() {
             </div>
           )}
 
-          <div className="stream-footer">
-            <p>POWERED BY JKT48Connect</p>
-          </div>
+          <div className="stream-footer"><p>POWERED BY JKT48Connect</p></div>
         </div>
 
-        {/* KANAN: Live Chat */}
+        {/* KANAN: Chat */}
         <div className="chat-sidebar">
           <div className="chat-header">
             <span>Live Chat</span>
@@ -742,7 +645,11 @@ function LiveStream() {
           <div className="chat-messages">
             {chatMessages.map((msg, idx) => (
               <div key={idx} className="chat-message">
-                <img src={msg.avatar_url || "https://ui-avatars.com/api/?name=" + msg.username} alt="avatar" className="chat-avatar" />
+                <img
+                  src={msg.avatar_url || `https://ui-avatars.com/api/?name=${msg.username}`}
+                  alt="avatar"
+                  className="chat-avatar"
+                />
                 <div className="chat-message-content">
                   <div className="chat-username">
                     {msg.role && msg.role !== "member" && (
@@ -788,7 +695,9 @@ function LiveStream() {
             ) : (
               <div className="chat-disabled-overlay">
                 Hanya bisa melihat chat.<br />
-                <a href="/login" onClick={(e) => { e.preventDefault(); navigate("/login"); }}>Login JKT48Connect</a> untuk ikut komen.
+                <a href="/login" onClick={(e) => { e.preventDefault(); navigate("/login"); }}>
+                  Login JKT48Connect
+                </a> untuk ikut komen.
               </div>
             )}
           </div>
