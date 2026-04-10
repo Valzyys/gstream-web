@@ -14,6 +14,21 @@ const HANABIRA_ORIGIN    = "https://stream.hanabira48.com";
 const STREAM2_API        = `${API_BASE}/live/stream`;
 const STREAM2_SHOW_ID    = "SH86F5";
 
+// ─── Proxy Constants ──────────────────────────────────────────────────────────
+const STREAM_PROXY_BASE = "https://stream.jkt48connect.com/hls/";
+
+// ─── Proxy Helper ─────────────────────────────────────────────────────────────
+/**
+ * Membungkus decoded stream URL melalui proxy:
+ * https://stream.jkt48connect.com/hls/{encoded_url}
+ */
+function proxyStreamUrl(url) {
+  if (!url) return url;
+  // Jangan proxy ulang kalau sudah melalui proxy yang sama
+  if (url.startsWith(STREAM_PROXY_BASE)) return url;
+  return STREAM_PROXY_BASE + encodeURIComponent(url);
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function charmapToString(obj) {
   return Object.keys(obj)
@@ -136,54 +151,64 @@ async function fetchStream2Data(tokenData) {
     `${STREAM2_API}?apikey=${API_KEY}&showId=${encodeURIComponent(STREAM2_SHOW_ID)}`,
     { method: "GET", headers }
   );
-  if (!res.ok) throw new Error(`Stream2 HTTP ${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(`Stream2 HTTP ${res.status}`);
   return await res.json();
 }
 
-// ─── resolveStream2: Langsung rewrite URL, TANPA fetchProxyUrl ───────────────
-// stream_url suffix (.jpg/.ts/dll) tidak masalah — proxy tetap return M3U8
-// Headers diinjek via HLS.js xhrSetup, bukan fetch manual (hindari CORS)
+// Step 3: Fetch proxy URL (stream_url) dengan headers token → dapat text (URL M3U8 asli)
+async function fetchProxyUrl(proxyUrl, tokenData) {
+  const rewritten = rewriteProxyUrl(proxyUrl);
+  const headers   = buildHanabiraHeaders(tokenData);
+  const res = await fetch(rewritten, { method: "GET", headers });
+  if (!res.ok) throw new Error(`Proxy fetch HTTP ${res.status}`);
+  return (await res.text()).trim();
+}
+
 async function resolveStream2(tokenData) {
+  // Step 2: Ambil data stream dari JKT48Connect API
   const data = await fetchStream2Data(tokenData);
 
-  if (!data.success) {
-    throw new Error(
-      data.message
-        ? `API Error: ${data.message}`
-        : `API Error: ${JSON.stringify(data)}`
-    );
-  }
+  if (!data.success) throw new Error(data.message || "Stream2 API error");
 
   let streams = [];
 
   if (Array.isArray(data.streams) && data.streams.length) {
-    // Langsung rewrite proxy domain pada stream_url — TIDAK fetch ulang
-    // Suffix URL (.jpg/.ts/dll) diabaikan oleh proxy, HLS player yang handle
-    streams = data.streams.map((s) => ({
-      ...s,
-      url: rewriteProxyUrl(s.url),
-    }));
+    // API sudah return streams[] — gunakan stream_url_decoded sebagai URL putar
+    // lalu wrap melalui proxy stream.jkt48connect.com/hls/{encoded}
+    streams = data.streams.map((s) => {
+      const decodedUrl = s.stream_url_decoded || rewriteProxyUrl(s.url);
+      return {
+        ...s,
+        url: proxyStreamUrl(decodedUrl),
+      };
+    });
   } else if (data.stream_url) {
-    // Fallback: rewrite stream_url langsung
-    streams = [{
-      NAME:      "default",
-      BANDWIDTH: "0",
-      url:       rewriteProxyUrl(data.stream_url),
-    }];
+    // Fallback: fetch proxy URL untuk dapat URL asli
+    try {
+      const decoded = await fetchProxyUrl(data.stream_url, tokenData);
+      // Cek apakah decoded adalah URL valid
+      if (decoded.startsWith("http")) {
+        streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(decoded) }];
+      } else if (decoded.startsWith("#EXTM3U")) {
+        // Response langsung M3U8 text — proxy tiap stream entry
+        const parsed = parseM3U8(decoded);
+        streams = parsed.streams.map((s) => ({ ...s, url: proxyStreamUrl(s.url) }));
+      } else {
+        const rawUrl = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
+        streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(rawUrl) }];
+      }
+    } catch {
+      const rawUrl = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
+      streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(rawUrl) }];
+    }
   }
 
-  if (!streams.length) {
-    throw new Error(
-      "Server 2: tidak ada stream URL ditemukan. " +
-      `Raw response keys: ${Object.keys(data).join(", ")}`
-    );
-  }
+  if (!streams.length) throw new Error("Server 2: tidak ada stream URL ditemukan");
 
   return {
     streams,
-    session:   data.session || {},
+    session: data.session || {},
     tokenData,
-    rawData:   data,
   };
 }
 
@@ -220,74 +245,37 @@ function itemMatchesToday(item) {
 }
 
 // ─── HLS Player ───────────────────────────────────────────────────────────────
-// extraHeaders: object of headers diinjek via xhrSetup (untuk Server 2)
-function HLSPlayer({ src, title, pollUrl, extraHeaders }) {
+function HLSPlayer({ src, title, pollUrl }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
   const pollRef  = useRef(null);
   const srcRef   = useRef(src);
   const [status, setStatus] = useState("loading");
-  const [errMsg, setErrMsg] = useState("");
 
   const initHls = useCallback(async (url, video, resumeTime = 0) => {
     if (!url || !video) return;
     if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
 
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      // Safari native HLS — tidak bisa inject headers, langsung play
       video.src = url;
       if (resumeTime > 0) video.currentTime = resumeTime;
-      video.play().then(() => setStatus("playing")).catch((e) => {
-        setStatus("error");
-        setErrMsg("Safari native HLS error: " + (e?.message || e));
-      });
+      video.play().then(() => setStatus("playing")).catch(() => setStatus("error"));
       return;
     }
 
     try {
       const Hls = (await import("hls.js")).default;
-      if (!Hls.isSupported()) {
-        setStatus("error");
-        setErrMsg("HLS.js tidak didukung di browser ini");
-        return;
-      }
+      if (!Hls.isSupported()) { setStatus("error"); return; }
 
-      const hlsConfig = {
+      const hls = new Hls({
         enableWorker:          true,
         lowLatencyMode:        true,
         liveSyncDurationCount: 3,
         liveDurationInfinity:  true,
-      };
-
-      // Inject headers via xhrSetup — setiap request XHR (playlist + segment) pakai headers ini
-      if (extraHeaders && Object.keys(extraHeaders).length) {
-        hlsConfig.xhrSetup = (xhr, xhrUrl) => {
-          try {
-            Object.entries(extraHeaders).forEach(([key, val]) => {
-              xhr.setRequestHeader(key, val);
-            });
-          } catch (_) {
-            // beberapa header seperti Origin/Referer di-block browser — skip saja
-          }
-        };
-      }
-
-      const hls = new Hls(hlsConfig);
+      });
       hlsRef.current = hls;
 
-      hls.on(Hls.Events.ERROR, (_, d) => {
-        if (d.fatal) {
-          setStatus("error");
-          const detail = [
-            d.type   ? `type: ${d.type}`   : null,
-            d.details ? `detail: ${d.details}` : null,
-            d.response?.code ? `HTTP ${d.response.code}` : null,
-            d.url    ? `url: ${d.url.slice(0, 80)}…` : null,
-          ].filter(Boolean).join(" | ");
-          setErrMsg(detail || "Fatal HLS error");
-        }
-      });
-
+      hls.on(Hls.Events.ERROR, (_, d) => { if (d.fatal) setStatus("error"); });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         if (resumeTime > 0) video.currentTime = resumeTime;
         video.play().then(() => setStatus("playing")).catch(() => {});
@@ -295,17 +283,13 @@ function HLSPlayer({ src, title, pollUrl, extraHeaders }) {
 
       hls.loadSource(url);
       hls.attachMedia(video);
-    } catch (e) {
-      setStatus("error");
-      setErrMsg(e?.message || String(e));
-    }
-  }, [extraHeaders]);
+    } catch { setStatus("error"); }
+  }, []);
 
   useEffect(() => {
     if (!src || !videoRef.current) return;
     srcRef.current = src;
     setStatus("loading");
-    setErrMsg("");
     initHls(src, videoRef.current, 0);
     return () => {
       clearInterval(pollRef.current);
@@ -355,20 +339,10 @@ function HLSPlayer({ src, title, pollUrl, extraHeaders }) {
         <div style={{
           position: "absolute", inset: 0, display: "flex",
           flexDirection: "column", alignItems: "center", justifyContent: "center",
-          background: "#0a0a0a", zIndex: 2, gap: 8, padding: "24px",
+          background: "#0a0a0a", zIndex: 2, gap: 8,
         }}>
           <span style={{ fontSize: 36 }}>⚠️</span>
-          <span style={{ color: "#DC1F2E", fontWeight: 700, fontSize: 14 }}>Gagal memuat stream</span>
-          {errMsg && (
-            <span style={{
-              color: "#ff9a9a", fontSize: 11, fontFamily: "var(--mono)",
-              background: "#DC1F2E0f", border: "1px solid #DC1F2E33",
-              borderRadius: 6, padding: "8px 12px", maxWidth: 420,
-              textAlign: "center", wordBreak: "break-all", lineHeight: 1.6,
-            }}>
-              {errMsg}
-            </span>
-          )}
+          <span style={{ color: "#DC1F2E", fontWeight: 700 }}>Gagal memuat stream</span>
           <span style={{ color: "#555", fontSize: 12 }}>Coba refresh atau pilih slug lain</span>
         </div>
       )}
@@ -467,15 +441,27 @@ export default function AdminLive() {
   useEffect(() => { if (authed) fetchShows(); }, [authed, fetchShows]);
 
   // ── Server 1: Fetch stream dari JKTConnect API ────────────────────────────
+  // Untuk Server 1, stream_url_decoded juga di-proxy
   const fetchStreamFromApi = useCallback(async (slug) => {
     const res      = await fetch(`${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`);
     const raw      = await res.json();
     const resolved = resolveStreamResponse(raw);
     if (!resolved.streams.length) return null;
-    const sorted = [...resolved.streams].sort(
+
+    // Wrap decoded URL melalui proxy untuk semua stream Server 1
+    const proxiedStreams = resolved.streams.map((s) => {
+      // Gunakan stream_url_decoded jika tersedia, lalu proxy
+      const decodedUrl = s.stream_url_decoded || s.url;
+      return {
+        ...s,
+        url: proxyStreamUrl(decodedUrl),
+      };
+    });
+
+    const sorted = [...proxiedStreams].sort(
       (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
     );
-    return { streams: resolved.streams, session: resolved.session, sorted };
+    return { streams: proxiedStreams, session: resolved.session, sorted };
   }, []);
 
   // ── Server 2: Token hanabira + stream JKT48Connect API ───────────────────
@@ -554,7 +540,7 @@ export default function AdminLive() {
         setActiveStream(best);
 
       } catch (e) {
-        if (!cancelled) setStreamError(e.message || String(e));
+        if (!cancelled) setStreamError(e.message);
       } finally {
         if (!cancelled) setStreamLoading(false);
       }
@@ -625,29 +611,6 @@ export default function AdminLive() {
     selectedSlugRef.current = null;
     activeStreamRef.current = null;
   };
-
-  // ── Shared stream error display ───────────────────────────────────────────
-  const StreamErrorBox = ({ msg, onRetry }) => (
-    <div className="al-stream-err">
-      <span style={{ fontSize: 36 }}>⚠️</span>
-      <p style={{ color: "#DC1F2E", fontWeight: 700, fontSize: 14, margin: 0 }}>
-        Gagal mengambil stream
-      </p>
-      {msg && (
-        <span style={{
-          color: "#ff9a9a", fontSize: 11, fontFamily: "var(--mono)",
-          background: "#DC1F2E0f", border: "1px solid #DC1F2E33",
-          borderRadius: 6, padding: "8px 12px", maxWidth: "90%",
-          textAlign: "center", wordBreak: "break-all", lineHeight: 1.6,
-        }}>
-          {msg}
-        </span>
-      )}
-      <button className="al-btn-primary sm" onClick={onRetry}>
-        Coba Lagi
-      </button>
-    </div>
-  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // LOGIN SCREEN
@@ -825,8 +788,6 @@ export default function AdminLive() {
                           ? "Mengambil stream…"
                           : streamData
                           ? <><span className="al-dot live" /> Stream aktif</>
-                          : streamError
-                          ? <span style={{ color: "#DC1F2E" }}>Error</span>
                           : "—"}
                       </span>
                     </div>
@@ -848,25 +809,21 @@ export default function AdminLive() {
                   )}
 
                   {!streamLoading && streamError && (
-                    <StreamErrorBox msg={streamError} onRetry={handleRetry} />
+                    <div className="al-stream-err">
+                      <span style={{ fontSize: 36 }}>⚠️</span>
+                      <p>{streamError}</p>
+                      <button className="al-btn-primary sm" onClick={handleRetry}>
+                        Coba Lagi
+                      </button>
+                    </div>
                   )}
 
                   {!streamLoading && !streamError && activeStream?.url && (
                     <HLSPlayer
                       key={`${activeServer}-${selectedSlug}`}
                       src={activeStream.url}
-                      title={
-                        activeServer === 2
-                          ? `IDN Live – ${STREAM2_SHOW_ID}`
-                          : (selectedShow?.title || selectedSlug)
-                      }
+                      title={activeServer === 2 ? `IDN Live – ${STREAM2_SHOW_ID}` : (selectedShow?.title || selectedSlug)}
                       pollUrl={pollUrl}
-                      // Inject headers hanya untuk Server 2 via xhrSetup HLS.js
-                      extraHeaders={
-                        activeServer === 2 && stream2TokenRef.current
-                          ? buildHanabiraHeaders(stream2TokenRef.current)
-                          : undefined
-                      }
                     />
                   )}
 
@@ -953,7 +910,11 @@ export default function AdminLive() {
                     </div>
                   )}
                   {!streamLoading && streamError && (
-                    <StreamErrorBox msg={streamError} onRetry={handleRetry} />
+                    <div className="al-stream-err">
+                      <span style={{ fontSize: 36 }}>⚠️</span>
+                      <p>{streamError}</p>
+                      <button className="al-btn-primary sm" onClick={handleRetry}>Coba Lagi</button>
+                    </div>
                   )}
                   {!streamLoading && !streamError && activeStream?.url && (
                     <HLSPlayer
@@ -961,11 +922,6 @@ export default function AdminLive() {
                       src={activeStream.url}
                       title={`IDN Live – ${STREAM2_SHOW_ID}`}
                       pollUrl={pollUrl}
-                      extraHeaders={
-                        stream2TokenRef.current
-                          ? buildHanabiraHeaders(stream2TokenRef.current)
-                          : undefined
-                      }
                     />
                   )}
                 </div>
@@ -1076,8 +1032,7 @@ const globalStyles = `
   .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
   .al-price-badge { margin-left: auto; flex-shrink: 0; background: #f59e0b22; border: 1px solid #f59e0b44; color: #f59e0b; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; font-family: var(--mono); }
   .al-player-wrap { border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line); min-height: 200px; position: relative; }
-  .al-stream-loading { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
-  .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); padding: 24px; }
+  .al-stream-loading, .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
 
   .al-quality-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
   .al-quality-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; }
