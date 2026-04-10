@@ -2,20 +2,19 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
-const ADMIN_USER        = "JKT48Connect";
-const ADMIN_PASS        = "21082007";
-const API_BASE          = "https://v2.jkt48connect.com/api/jkt48";
-const API_KEY           = "JKTCONNECT";
-const PLAYLIST_POLL_MS  = 3_000;
+const ADMIN_USER       = "JKT48Connect";
+const ADMIN_PASS       = "21082007";
+const API_BASE         = "https://v2.jkt48connect.com/api/jkt48";
+const API_KEY          = "JKTCONNECT";
+const PLAYLIST_POLL_MS = 3_000;
 
-// ─── Server 2 (Hanabira48) Constants ─────────────────────────────────────────
-const HANABIRA_TOKEN_API  = "https://hanabira48.com/api/stream-token";
-const HANABIRA_STREAM_API = "https://proxy.mediastream48.workers.dev/api/stream/v2/playback";
-const HANABIRA_ORIGIN     = "https://stream.hanabira48.com";
-const HANABIRA_SHOW_ID    = "SH86F5";
+// ─── Server 2 Constants ───────────────────────────────────────────────────────
+const HANABIRA_TOKEN_API = "https://hanabira48.com/api/stream-token";
+const HANABIRA_ORIGIN    = "https://stream.hanabira48.com";
+const STREAM2_API        = `${API_BASE}/live/stream`;
+const STREAM2_SHOW_ID    = "SH86F5";
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
 function charmapToString(obj) {
   return Object.keys(obj)
     .filter((k) => !isNaN(k))
@@ -35,6 +34,7 @@ function parseM3U8(m3u8) {
   const session = {};
   const streams = [];
   let current   = null;
+
   for (const line of lines) {
     if (line.startsWith("#EXT-X-SESSION-DATA:")) {
       const id  = (line.match(/DATA-ID="([^"]+)"/)  || [])[1];
@@ -68,12 +68,14 @@ function parseM3U8(m3u8) {
       current = null;
     }
   }
+
   return { session, streams };
 }
 
 function resolveStreamResponse(data) {
   if (data && Array.isArray(data.streams) && data.streams.length)
     return { session: data.session || {}, streams: data.streams, raw: data };
+
   if (isCharmap(data)) {
     const str = charmapToString(data).trim();
     if (str.startsWith("#EXTM3U")) {
@@ -83,115 +85,116 @@ function resolveStreamResponse(data) {
     try { return resolveStreamResponse(JSON.parse(str)); }
     catch { return { session: {}, streams: [], raw: { raw_string: str } }; }
   }
+
   const flatUrl =
     data?.stream_url || data?.data?.stream_url ||
     data?.playback_url || data?.data?.playback_url ||
     data?.url || null;
+
   if (flatUrl)
     return { session: {}, streams: [{ NAME: "default", BANDWIDTH: "0", url: flatUrl }], raw: data };
+
   return { session: {}, streams: [], raw: data };
 }
 
-// ─── Hanabira48 Stream Resolver ───────────────────────────────────────────────
-// Step 1: GET /api/stream-token?showId=SH86F5  → { data: { apiToken, tokenId, secKey, showId } }
-// Step 2: GET proxy/api/stream/v2/playback with headers → response berupa .jpg URL (m3u8 playlist)
-// Step 3: parse m3u8 dari .jpg URL tersebut
+// ─── Rewrite proxy domain ke idn.jkt48connect.com ────────────────────────────
+function rewriteProxyUrl(url) {
+  if (!url) return url;
+  return url.replace(
+    /https:\/\/proxy\.mediastream48\.workers\.dev/g,
+    "https://idn.jkt48connect.com"
+  );
+}
 
-async function fetchHanabiraToken(showId = HANABIRA_SHOW_ID) {
+// ─── Server 2 helpers ─────────────────────────────────────────────────────────
+async function fetchHanabiraToken(showId = STREAM2_SHOW_ID) {
   const res  = await fetch(`${HANABIRA_TOKEN_API}?showId=${encodeURIComponent(showId)}`);
   const json = await res.json();
-  if (!json.success || !json.data) throw new Error("Hanabira token gagal: " + JSON.stringify(json));
+  if (!json.success || !json.data) throw new Error("Token gagal: " + JSON.stringify(json));
   return json.data; // { apiToken, tokenId, secKey, showId }
 }
 
-async function fetchHanabiraPlayback(tokenData) {
+function buildHanabiraHeaders(tokenData) {
   const { apiToken, tokenId, secKey, showId } = tokenData;
-  const res = await fetch(HANABIRA_STREAM_API, {
-    method:  "GET",
-    headers: {
-      "Accept":           "*/*",
-      "Accept-Language":  "en-US,en;q=0.9",
-      "Connection":       "keep-alive",
-      "Origin":           HANABIRA_ORIGIN,
-      "Referer":          HANABIRA_ORIGIN + "/",
-      "x-api-token":      apiToken,
-      "x-sec-key":        secKey,
-      "x-showid":         showId,
-      "x-token-id":       tokenId,
-    },
-  });
-
-  if (!res.ok) throw new Error(`Hanabira playback HTTP ${res.status}`);
-
-  // Response bisa berupa text URL (.jpg), JSON, atau M3U8 langsung
-  const contentType = res.headers.get("content-type") || "";
-  let body;
-
-  if (contentType.includes("application/json")) {
-    body = await res.json();
-  } else {
-    body = await res.text();
-  }
-
-  return body;
-}
-
-// Konvert .jpg URL ke m3u8 streams
-// Output playback API = URL berupa .jpg → itu sebenarnya M3U8 playlist yang di-proxy
-// Kita fetch URL tersebut lalu parse sebagai M3U8
-async function resolveHanabiraStreams(tokenData) {
-  const playbackBody = await fetchHanabiraPlayback(tokenData);
-
-  let m3u8Url = null;
-
-  if (typeof playbackBody === "string") {
-    const trimmed = playbackBody.trim();
-    // Kalau langsung M3U8
-    if (trimmed.startsWith("#EXTM3U")) {
-      const parsed = parseM3U8(trimmed);
-      if (parsed.streams.length) return { streams: parsed.streams, session: parsed.session, tokenData };
-    }
-    // Kalau URL langsung (berakhiran .jpg atau lainnya)
-    if (trimmed.startsWith("http")) {
-      m3u8Url = trimmed;
-    }
-  } else if (typeof playbackBody === "object") {
-    // Coba ambil URL dari berbagai field
-    m3u8Url =
-      playbackBody?.url ||
-      playbackBody?.data?.url ||
-      playbackBody?.stream_url ||
-      playbackBody?.data?.stream_url ||
-      playbackBody?.playback_url ||
-      null;
-
-    // Kalau sudah ada streams langsung
-    if (playbackBody?.streams) {
-      const resolved = resolveStreamResponse(playbackBody);
-      if (resolved.streams.length) return { ...resolved, tokenData };
-    }
-  }
-
-  if (!m3u8Url) throw new Error("Hanabira: tidak bisa menemukan stream URL dari response");
-
-  // Fetch URL .jpg tersebut → sebenarnya M3U8
-  const m3u8Res  = await fetch(m3u8Url);
-  const m3u8Text = await m3u8Res.text();
-
-  if (m3u8Text.trim().startsWith("#EXTM3U")) {
-    const parsed = parseM3U8(m3u8Text);
-    return { streams: parsed.streams, session: parsed.session, tokenData, sourceUrl: m3u8Url };
-  }
-
-  // Fallback: gunakan URL .jpg langsung sebagai stream
   return {
-    streams: [{ NAME: "default", BANDWIDTH: "0", url: m3u8Url }],
-    session: {},
-    tokenData,
-    sourceUrl: m3u8Url,
+    "Accept":          "*/*",
+    "Accept-Language": "en-US,en;q=0.9",
+    "Connection":      "keep-alive",
+    "Origin":          HANABIRA_ORIGIN,
+    "Referer":         HANABIRA_ORIGIN + "/",
+    "x-api-token":     apiToken,
+    "x-sec-key":       secKey,
+    "x-showid":        showId,
+    "x-token-id":      tokenId,
   };
 }
 
+// Step 2: Hit JKT48Connect stream API dengan headers token
+async function fetchStream2Data(tokenData) {
+  const headers = buildHanabiraHeaders(tokenData);
+  const res = await fetch(
+    `${STREAM2_API}?apikey=${API_KEY}&showId=${encodeURIComponent(STREAM2_SHOW_ID)}`,
+    { method: "GET", headers }
+  );
+  if (!res.ok) throw new Error(`Stream2 HTTP ${res.status}`);
+  return await res.json();
+}
+
+// Step 3: Fetch proxy URL (stream_url) dengan headers token → dapat text (URL M3U8 asli)
+async function fetchProxyUrl(proxyUrl, tokenData) {
+  const rewritten = rewriteProxyUrl(proxyUrl);
+  const headers   = buildHanabiraHeaders(tokenData);
+  const res = await fetch(rewritten, { method: "GET", headers });
+  if (!res.ok) throw new Error(`Proxy fetch HTTP ${res.status}`);
+  return (await res.text()).trim();
+}
+
+async function resolveStream2(tokenData) {
+  // Step 2: Ambil data stream dari JKT48Connect API
+  const data = await fetchStream2Data(tokenData);
+
+  if (!data.success) throw new Error(data.message || "Stream2 API error");
+
+  let streams = [];
+
+  if (Array.isArray(data.streams) && data.streams.length) {
+    // API sudah return streams[] — gunakan stream_url_decoded sebagai URL putar
+    // stream_url_decoded = URL playlist live-video.net (langsung bisa diputar HLS)
+    streams = data.streams.map((s) => ({
+      ...s,
+      url: s.stream_url_decoded || rewriteProxyUrl(s.url),
+    }));
+  } else if (data.stream_url) {
+    // Fallback: fetch proxy URL untuk dapat URL asli
+    try {
+      const decoded = await fetchProxyUrl(data.stream_url, tokenData);
+      // Cek apakah decoded adalah URL valid
+      if (decoded.startsWith("http")) {
+        streams = [{ NAME: "default", BANDWIDTH: "0", url: decoded }];
+      } else if (decoded.startsWith("#EXTM3U")) {
+        // Response langsung M3U8 text
+        const parsed = parseM3U8(decoded);
+        streams = parsed.streams;
+      } else {
+        const url = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
+        streams = [{ NAME: "default", BANDWIDTH: "0", url }];
+      }
+    } catch {
+      const url = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
+      streams = [{ NAME: "default", BANDWIDTH: "0", url }];
+    }
+  }
+
+  if (!streams.length) throw new Error("Server 2: tidak ada stream URL ditemukan");
+
+  return {
+    streams,
+    session: data.session || {},
+    tokenData,
+  };
+}
+
+// ─── Date / Time Helpers ──────────────────────────────────────────────────────
 function tsToDate(ts) {
   if (!ts) return null;
   const n = Number(ts);
@@ -270,7 +273,6 @@ function HLSPlayer({ src, title, pollUrl }) {
     srcRef.current = src;
     setStatus("loading");
     initHls(src, videoRef.current, 0);
-
     return () => {
       clearInterval(pollRef.current);
       if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
@@ -357,7 +359,7 @@ function ServerBadge({ server, onChange }) {
         >
           <span className="al-server-dot s2" />
           Server 2
-          <em>Hanabira48</em>
+          <em>IDN Stream</em>
         </button>
       </div>
     </div>
@@ -380,18 +382,13 @@ export default function AdminLive() {
   const [selectedSlug,  setSelectedSlug]  = useState(null);
   const [selectedShow,  setSelectedShow]  = useState(null);
 
-  // Server selection: 1 = JKTConnect, 2 = Hanabira48
   const [activeServer,  setActiveServer]  = useState(1);
-
   const [streamData,    setStreamData]    = useState(null);
   const [streamLoading, setStreamLoading] = useState(false);
   const [streamError,   setStreamError]   = useState("");
   const [activeStream,  setActiveStream]  = useState(null);
 
-  // Hanabira token state
-  const [hanabiraToken, setHanabiraToken] = useState(null);
-  const hanabiraTokenRef = useRef(null);
-
+  const stream2TokenRef  = useRef(null);
   const activeStreamRef  = useRef(null);
   const selectedSlugRef  = useRef(null);
   const activeServerRef  = useRef(1);
@@ -437,13 +434,11 @@ export default function AdminLive() {
     return { streams: resolved.streams, session: resolved.session, sorted };
   }, []);
 
-  // ── Server 2: Fetch stream dari Hanabira48 ────────────────────────────────
-  const fetchHanabiraStream = useCallback(async () => {
-    const tokenData = await fetchHanabiraToken(HANABIRA_SHOW_ID);
-    hanabiraTokenRef.current = tokenData;
-    setHanabiraToken(tokenData);
-
-    const result = await resolveHanabiraStreams(tokenData);
+  // ── Server 2: Token hanabira + stream JKT48Connect API ───────────────────
+  const fetchStream2 = useCallback(async () => {
+    const tokenData = await fetchHanabiraToken(STREAM2_SHOW_ID);
+    stream2TokenRef.current = tokenData;
+    const result = await resolveStream2(tokenData);
     const sorted = [...result.streams].sort(
       (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
     );
@@ -457,7 +452,7 @@ export default function AdminLive() {
     const result = await fetchStreamFromApi(slug);
     if (!result) return null;
     const currentName = activeStreamRef.current?.NAME;
-    const match = result.streams.find((s) => s.NAME === currentName);
+    const match  = result.streams.find((s) => s.NAME === currentName);
     const target = match || result.sorted[0];
     setStreamData({ streams: result.streams, session: result.session });
     return target?.url ?? null;
@@ -467,27 +462,27 @@ export default function AdminLive() {
   const pollUrlServer2 = useCallback(async () => {
     if (activeServerRef.current !== 2) return null;
     try {
-      const result = await fetchHanabiraStream();
+      const result = await fetchStream2();
       if (!result) return null;
       const currentName = activeStreamRef.current?.NAME;
-      const match = result.streams.find((s) => s.NAME === currentName);
+      const match  = result.streams.find((s) => s.NAME === currentName);
       const target = match || result.sorted[0];
       setStreamData({ streams: result.streams, session: result.session });
       return target?.url ?? null;
     } catch {
       return null;
     }
-  }, [fetchHanabiraStream]);
+  }, [fetchStream2]);
 
-  // pollUrl yang aktif tergantung server
   const pollUrl = activeServer === 2 ? pollUrlServer2 : pollUrlServer1;
 
   // ── Load stream saat slug atau server berubah ─────────────────────────────
   useEffect(() => {
     if (!selectedSlug && activeServer === 1) return;
-    selectedSlugRef.current  = selectedSlug;
-    activeServerRef.current  = activeServer;
-    activeStreamRef.current  = null;
+
+    selectedSlugRef.current = selectedSlug;
+    activeServerRef.current = activeServer;
+    activeStreamRef.current = null;
 
     let cancelled = false;
 
@@ -496,12 +491,11 @@ export default function AdminLive() {
       setStreamError("");
       setStreamData(null);
       setActiveStream(null);
-      setHanabiraToken(null);
 
       try {
         let result;
         if (activeServer === 2) {
-          result = await fetchHanabiraStream();
+          result = await fetchStream2();
         } else {
           if (!selectedSlug) { setStreamLoading(false); return; }
           result = await fetchStreamFromApi(selectedSlug);
@@ -515,10 +509,6 @@ export default function AdminLive() {
         setStreamData({ streams: result.streams, session: result.session });
         setActiveStream(best);
 
-        if (activeServer === 2 && result.tokenData) {
-          setHanabiraToken(result.tokenData);
-          hanabiraTokenRef.current = result.tokenData;
-        }
       } catch (e) {
         if (!cancelled) setStreamError(e.message);
       } finally {
@@ -528,7 +518,7 @@ export default function AdminLive() {
 
     load();
     return () => { cancelled = true; };
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedSlug, activeServer]);
 
   // ── Pilih resolusi manual ─────────────────────────────────────────────────
@@ -542,11 +532,27 @@ export default function AdminLive() {
     if (serverNum === activeServer) return;
     setActiveServer(serverNum);
     activeServerRef.current = serverNum;
-    // Reset stream state, useEffect akan otomatis trigger load
     setStreamData(null);
     setActiveStream(null);
     setStreamError("");
-    setHanabiraToken(null);
+    stream2TokenRef.current = null;
+  };
+
+  // ── Retry ─────────────────────────────────────────────────────────────────
+  const handleRetry = () => {
+    if (activeServer === 2) {
+      setStreamData(null);
+      setActiveStream(null);
+      setStreamError("");
+      stream2TokenRef.current = null;
+      const sv = activeServer;
+      setActiveServer(0);
+      setTimeout(() => setActiveServer(sv), 50);
+    } else {
+      const s = selectedSlug;
+      setSelectedSlug(null);
+      setTimeout(() => setSelectedSlug(s), 50);
+    }
   };
 
   // ── Login / Logout ────────────────────────────────────────────────────────
@@ -571,10 +577,9 @@ export default function AdminLive() {
     setShows([]);
     setStreamData(null);
     setSelectedSlug(null);
-    setHanabiraToken(null);
+    stream2TokenRef.current = null;
     selectedSlugRef.current = null;
     activeStreamRef.current = null;
-    hanabiraTokenRef.current = null;
   };
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -656,7 +661,9 @@ export default function AdminLive() {
                 {showsLoading ? <span className="al-spin sm" /> : "↻"}
               </button>
             </div>
+
             {showsError && <div className="al-error">{showsError}</div>}
+
             {showsLoading && !shows.length && (
               <div className="al-placeholder">
                 {[1, 2, 3].map((i) => (
@@ -664,9 +671,11 @@ export default function AdminLive() {
                 ))}
               </div>
             )}
+
             {!showsLoading && !shows.length && !showsError && (
               <div className="al-empty">Tidak ada show ditemukan untuk hari ini.</div>
             )}
+
             <div className="al-show-list">
               {shows.map((item) => {
                 const isActive  = item.slug === selectedSlug;
@@ -675,6 +684,7 @@ export default function AdminLive() {
                   ? new Date(schedDate.getTime() + 7 * 3600 * 1000)
                       .toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" })
                   : "—";
+
                 return (
                   <button
                     key={item.slug}
@@ -710,7 +720,7 @@ export default function AdminLive() {
               </div>
             ) : (
               <>
-                {/* Meta bar: server 1 pakai show info, server 2 pakai info Hanabira */}
+                {/* Meta bar Server 1 */}
                 {activeServer === 1 && selectedShow && (
                   <div className="al-meta-bar">
                     <img
@@ -734,28 +744,25 @@ export default function AdminLive() {
                   </div>
                 )}
 
+                {/* Meta bar Server 2 */}
                 {activeServer === 2 && (
                   <div className="al-meta-bar">
-                    <div className="al-hanabira-icon">🌸</div>
+                    <div className="al-s2-icon">📡</div>
                     <div>
-                      <h1 className="al-stream-title">Hanabira48 Stream</h1>
+                      <h1 className="al-stream-title">IDN Live Stream</h1>
                       <span className="al-stream-sub">
-                        Show ID: <code style={{ fontFamily: "var(--mono)", color: "var(--pink)" }}>{HANABIRA_SHOW_ID}</code>
+                        Show ID:&nbsp;
+                        <code style={{ fontFamily: "var(--mono)", color: "var(--accent2)" }}>{STREAM2_SHOW_ID}</code>
                         &nbsp;·&nbsp;
-                        {hanabiraToken ? (
-                          <>
-                            <span className="al-dot live" />
-                            Token aktif
-                          </>
-                        ) : streamLoading ? (
-                          "Mengambil token…"
-                        ) : (
-                          "—"
-                        )}
+                        {streamLoading
+                          ? "Mengambil stream…"
+                          : streamData
+                          ? <><span className="al-dot live" /> Stream aktif</>
+                          : "—"}
                       </span>
                     </div>
-                    <div className="al-price-badge" style={{ borderColor: "#ff6eb444", color: "#ff6eb4", background: "#ff6eb411" }}>
-                      🌸 SERVER 2
+                    <div className="al-price-badge" style={{ borderColor: "#3b82f644", color: "#3b82f6", background: "#3b82f611" }}>
+                      📡 SERVER 2
                     </div>
                   </div>
                 )}
@@ -767,56 +774,35 @@ export default function AdminLive() {
                   {streamLoading && (
                     <div className="al-stream-loading">
                       <div className="al-spin xl" />
-                      <p>
-                        {activeServer === 2
-                          ? "Mengambil token Hanabira48 & stream URL…"
-                          : "Mengambil stream URL…"}
-                      </p>
+                      <p>Mengambil stream URL…</p>
                     </div>
                   )}
+
                   {!streamLoading && streamError && (
                     <div className="al-stream-err">
                       <span style={{ fontSize: 36 }}>⚠️</span>
                       <p>{streamError}</p>
-                      <button
-                        className="al-btn-primary sm"
-                        onClick={() => {
-                          if (activeServer === 2) {
-                            // Force re-trigger dengan toggle server
-                            setStreamData(null);
-                            setActiveStream(null);
-                            setStreamError("");
-                            setHanabiraToken(null);
-                            // Trigger ulang dengan dummy state change
-                            setActiveServer(s => s); // tidak akan trigger, pakai cara lain:
-                            const sv = activeServer;
-                            setActiveServer(0);
-                            setTimeout(() => setActiveServer(sv), 50);
-                          } else {
-                            const s = selectedSlug;
-                            setSelectedSlug(null);
-                            setTimeout(() => setSelectedSlug(s), 50);
-                          }
-                        }}
-                      >
+                      <button className="al-btn-primary sm" onClick={handleRetry}>
                         Coba Lagi
                       </button>
                     </div>
                   )}
+
                   {!streamLoading && !streamError && activeStream?.url && (
                     <HLSPlayer
                       key={`${activeServer}-${selectedSlug}`}
                       src={activeStream.url}
-                      title={activeServer === 2 ? `  ${HANABIRA_SHOW_ID}` : (selectedShow?.title || selectedSlug)}
+                      title={activeServer === 2 ? `IDN Live – ${STREAM2_SHOW_ID}` : (selectedShow?.title || selectedSlug)}
                       pollUrl={pollUrl}
                     />
                   )}
+
                   {!streamLoading && !streamError && streamData && !activeStream?.url && (
                     <div className="al-stream-err">
                       <span style={{ fontSize: 36 }}>📭</span>
                       <p>Stream URL tidak tersedia.</p>
                       <span style={{ color: "#555", fontSize: 12 }}>
-                        {activeServer === 2 ? "Show ID: " + HANABIRA_SHOW_ID : "Status: " + selectedShow?.status}
+                        {activeServer === 2 ? "Show ID: " + STREAM2_SHOW_ID : "Status: " + selectedShow?.status}
                       </span>
                     </div>
                   )}
@@ -858,24 +844,6 @@ export default function AdminLive() {
                   </div>
                 )}
 
-                {/* Hanabira token info */}
-                {activeServer === 2 && hanabiraToken && (
-                  <div className="al-hanabira-info">
-                    <div className="al-hanabira-info-title">🌸 Token Info</div>
-                    <div className="al-hanabira-chips">
-                      <span className="al-hanabira-chip">
-                        <em>Show ID:</em> {hanabiraToken.showId}
-                      </span>
-                      <span className="al-hanabira-chip">
-                        <em>Token ID:</em> {hanabiraToken.tokenId?.slice(0, 8)}…
-                      </span>
-                      <span className="al-hanabira-chip">
-                        <em>Sec Key:</em> {hanabiraToken.secKey?.slice(0, 8)}…
-                      </span>
-                    </div>
-                  </div>
-                )}
-
                 {/* Slug row (server 1 only) */}
                 {activeServer === 1 && selectedSlug && (
                   <div className="al-slug-row">
@@ -900,7 +868,7 @@ export default function AdminLive() {
               </>
             )}
 
-            {/* Server 2 tanpa show selected di server 1 */}
+            {/* Server 2 tanpa show selected */}
             {activeServer === 2 && !selectedSlug && (
               <>
                 <ServerBadge server={activeServer} onChange={handleServerChange} />
@@ -908,20 +876,21 @@ export default function AdminLive() {
                   {streamLoading && (
                     <div className="al-stream-loading">
                       <div className="al-spin xl" />
-                      <p>Mengambil token & stream URL…</p>
+                      <p>Mengambil stream URL…</p>
                     </div>
                   )}
                   {!streamLoading && streamError && (
                     <div className="al-stream-err">
                       <span style={{ fontSize: 36 }}>⚠️</span>
                       <p>{streamError}</p>
+                      <button className="al-btn-primary sm" onClick={handleRetry}>Coba Lagi</button>
                     </div>
                   )}
                   {!streamLoading && !streamError && activeStream?.url && (
                     <HLSPlayer
-                      key={`server2-noshow`}
+                      key="server2-noshow"
                       src={activeStream.url}
-                      title={`Hanabira48 - ${HANABIRA_SHOW_ID}`}
+                      title={`IDN Live – ${STREAM2_SHOW_ID}`}
                       pollUrl={pollUrl}
                     />
                   )}
@@ -938,16 +907,14 @@ export default function AdminLive() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const globalStyles = `
   @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Syne:wght@700;800&family=Inter:wght@400;500;600&display=swap');
-
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-
   :root {
     --red:     #DC1F2E;
     --red-dim: #DC1F2E22;
     --red-mid: #DC1F2E55;
-    --pink:    #ff6eb4;
-    --pink-dim:#ff6eb411;
-    --pink-mid:#ff6eb444;
+    --accent2: #3b82f6;
+    --a2-dim:  #3b82f611;
+    --a2-mid:  #3b82f644;
     --bg:      #080808;
     --bg2:     #111111;
     --bg3:     #181818;
@@ -960,12 +927,11 @@ const globalStyles = `
     --sans:    'Inter', sans-serif;
     --display: 'Syne', sans-serif;
   }
-
-  @keyframes spin    { to { transform: rotate(360deg); } }
-  @keyframes fadeIn  { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-  @keyframes pulse   { 0%,100% { opacity:1 } 50% { opacity:.4 } }
-  @keyframes shimmer { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
-  @keyframes pinkPulse { 0%,100% { box-shadow: 0 0 0 0 #ff6eb433; } 50% { box-shadow: 0 0 0 6px #ff6eb400; } }
+  @keyframes spin      { to { transform: rotate(360deg); } }
+  @keyframes fadeIn    { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+  @keyframes pulse     { 0%,100% { opacity:1 } 50% { opacity:.4 } }
+  @keyframes shimmer   { 0% { background-position: -400px 0; } 100% { background-position: 400px 0; } }
+  @keyframes bluePulse { 0%,100% { box-shadow: 0 0 0 0 #3b82f633; } 50% { box-shadow: 0 0 0 6px #3b82f600; } }
 
   .al-noise { pointer-events: none; position: fixed; inset: 0; z-index: 0; background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 200 200' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.75' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.03'/%3E%3C/svg%3E"); background-size: 200px; opacity: .5; }
 
@@ -984,7 +950,6 @@ const globalStyles = `
   .al-field input { background: var(--bg3); border: 1px solid var(--line); border-radius: 8px; padding: 11px 14px; color: var(--txt); font-size: 14px; font-family: var(--sans); outline: none; transition: border-color .2s, box-shadow .2s; }
   .al-field input:focus { border-color: var(--red-mid); box-shadow: 0 0 0 3px var(--red-dim); }
   .al-error { background: #DC1F2E18; border: 1px solid #DC1F2E44; color: #ff6b6b; font-size: 13px; border-radius: 8px; padding: 10px 14px; }
-
   .al-btn-primary { display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--red); color: #fff; border: none; border-radius: 8px; padding: 12px 20px; font-size: 13px; font-weight: 700; letter-spacing: 2px; cursor: pointer; font-family: var(--display); transition: opacity .2s, transform .1s; }
   .al-btn-primary:hover { opacity: .88; }
   .al-btn-primary:active { transform: scale(.98); }
@@ -995,7 +960,6 @@ const globalStyles = `
   .al-btn-ghost.sm { padding: 5px 10px; font-size: 12px; }
   .al-btn-danger { background: transparent; border: 1px solid #DC1F2E44; color: var(--red); border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; transition: background .2s; font-family: var(--sans); }
   .al-btn-danger:hover { background: var(--red-dim); }
-
   .al-spin { display: inline-block; width: 18px; height: 18px; border: 2px solid #ffffff33; border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
   .al-spin.sm { width: 13px; height: 13px; }
   .al-spin.xl { width: 40px; height: 40px; border-width: 3px; border-top-color: var(--red); border-color: var(--red-dim); }
@@ -1007,8 +971,8 @@ const globalStyles = `
   .al-badge { background: var(--red); color: #fff; font-size: 9px; font-weight: 700; letter-spacing: 1.5px; padding: 2px 7px; border-radius: 4px; }
   .al-header-right { display: flex; align-items: center; gap: 10px; }
   .al-today { color: var(--txt2); font-size: 12px; font-family: var(--mono); }
-  .al-content { flex: 1; display: flex; position: relative; z-index: 1; }
 
+  .al-content { flex: 1; display: flex; position: relative; z-index: 1; }
   .al-sidebar { width: 320px; min-width: 280px; background: var(--bg2); border-right: 1px solid var(--line); display: flex; flex-direction: column; padding: 20px 16px; overflow-y: auto; max-height: calc(100vh - 56px); position: sticky; top: 56px; gap: 12px; }
   .al-sidebar-head { display: flex; align-items: center; justify-content: space-between; }
   .al-sidebar-head h2 { font-family: var(--display); font-size: 14px; font-weight: 800; letter-spacing: 2px; color: var(--txt2); text-transform: uppercase; }
@@ -1022,25 +986,21 @@ const globalStyles = `
   .al-show-meta { display: flex; align-items: center; gap: 5px; font-size: 10px; color: var(--txt2); font-family: var(--mono); }
   .al-show-slug { font-family: var(--mono); font-size: 9px; color: var(--txt3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .al-active-indicator { position: absolute; right: 10px; top: 50%; transform: translateY(-50%); color: var(--red); font-size: 10px; }
-
   .al-dot { width: 6px; height: 6px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
   .al-dot.live      { background: #22c55e; animation: pulse 1.5s infinite; }
   .al-dot.scheduled { background: #f59e0b; }
   .al-dot.ended     { background: #555; }
-
   .al-skeleton { background: linear-gradient(90deg, var(--bg3) 25%, var(--bg4) 50%, var(--bg3) 75%); background-size: 400px 100%; animation: shimmer 1.4s infinite linear; border-radius: 8px; }
   .al-empty { color: var(--txt3); font-size: 13px; text-align: center; padding: 24px 0; }
 
   .al-main { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; animation: fadeIn .3s ease; }
   .al-no-select { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--txt3); font-size: 15px; text-align: center; padding: 60px 0; }
-
   .al-meta-bar { display: flex; align-items: center; gap: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
   .al-creator-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid var(--line); }
-  .al-hanabira-icon { width: 44px; height: 44px; border-radius: 50%; background: var(--pink-dim); border: 2px solid var(--pink-mid); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; animation: pinkPulse 2s infinite; }
+  .al-s2-icon { width: 44px; height: 44px; border-radius: 50%; background: var(--a2-dim); border: 2px solid var(--a2-mid); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; animation: bluePulse 2s infinite; }
   .al-stream-title { font-family: var(--display); font-size: 16px; font-weight: 800; color: var(--txt); line-height: 1.2; }
   .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
   .al-price-badge { margin-left: auto; flex-shrink: 0; background: #f59e0b22; border: 1px solid #f59e0b44; color: #f59e0b; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; font-family: var(--mono); }
-
   .al-player-wrap { border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line); min-height: 200px; position: relative; }
   .al-stream-loading, .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
 
@@ -1059,7 +1019,6 @@ const globalStyles = `
   .al-slug-row { display: flex; align-items: center; gap: 8px; background: var(--bg2); border: 1px solid var(--line); border-radius: 8px; padding: 10px 14px; }
   .al-slug-label { color: var(--txt3); font-size: 11px; flex-shrink: 0; }
   .al-slug-code { flex: 1; font-family: var(--mono); font-size: 12px; color: var(--txt2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-
   .al-desc { background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
   .al-desc h4 { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--txt3); text-transform: uppercase; margin-bottom: 8px; }
   .al-desc p { font-size: 13px; color: var(--txt2); line-height: 1.7; white-space: pre-line; }
@@ -1068,25 +1027,17 @@ const globalStyles = `
   .al-server-toggle { display: flex; align-items: center; gap: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; }
   .al-server-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; font-family: var(--mono); flex-shrink: 0; }
   .al-server-pills { display: flex; gap: 8px; flex-wrap: wrap; }
-  .al-server-pill { display: flex; align-items: center; gap: 7px; background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 20px; cursor: pointer; transition: all .2s; font-family: var(--sans); position: relative; overflow: hidden; }
+  .al-server-pill { display: flex; align-items: center; gap: 7px; background: var(--bg3); border: 1px solid var(--line); color: var(--txt2); font-size: 12px; font-weight: 600; padding: 6px 14px; border-radius: 20px; cursor: pointer; transition: all .2s; font-family: var(--sans); }
   .al-server-pill em { font-style: normal; font-size: 10px; color: var(--txt3); font-family: var(--mono); margin-left: 2px; }
   .al-server-pill:hover { border-color: var(--txt3); color: var(--txt); }
   .al-server-pill.active { color: var(--txt); font-weight: 700; }
   .al-server-pill:nth-child(1).active { border-color: var(--red-mid); background: var(--red-dim); }
   .al-server-pill:nth-child(1).active em { color: var(--red); }
-  .al-server-pill:nth-child(2).active { border-color: var(--pink-mid); background: var(--pink-dim); }
-  .al-server-pill:nth-child(2).active em { color: var(--pink); }
-
+  .al-server-pill:nth-child(2).active { border-color: var(--a2-mid); background: var(--a2-dim); }
+  .al-server-pill:nth-child(2).active em { color: var(--accent2); }
   .al-server-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
   .al-server-dot.s1 { background: var(--red); }
-  .al-server-dot.s2 { background: var(--pink); }
-
-  /* ── Hanabira info ─────────────────────────────────────────────────────── */
-  .al-hanabira-info { background: var(--pink-dim); border: 1px solid var(--pink-mid); border-radius: 10px; padding: 12px 16px; display: flex; flex-direction: column; gap: 8px; }
-  .al-hanabira-info-title { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--pink); text-transform: uppercase; }
-  .al-hanabira-chips { display: flex; gap: 8px; flex-wrap: wrap; }
-  .al-hanabira-chip { background: #00000033; border: 1px solid var(--pink-mid); color: var(--txt2); font-size: 10px; padding: 2px 10px; border-radius: 4px; font-family: var(--mono); }
-  .al-hanabira-chip em { color: var(--pink); font-style: normal; margin-right: 4px; opacity: .7; }
+  .al-server-dot.s2 { background: var(--accent2); }
 
   @media (max-width: 768px) {
     .al-content { flex-direction: column; }
@@ -1097,3 +1048,4 @@ const globalStyles = `
     .al-server-toggle { flex-wrap: wrap; }
   }
 `;
+
