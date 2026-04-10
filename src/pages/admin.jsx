@@ -158,30 +158,49 @@ async function resolveStream2(tokenData) {
   let streams = [];
 
   if (Array.isArray(data.streams) && data.streams.length) {
-    // API sudah return streams[] — gunakan stream_url_decoded sebagai URL putar
-    // stream_url_decoded = URL playlist live-video.net (langsung bisa diputar HLS)
-    streams = data.streams.map((s) => ({
-      ...s,
-      url: s.stream_url_decoded || rewriteProxyUrl(s.url),
-    }));
+    // Gunakan stream_url (di-rewrite) + fetch dengan headers untuk dapat URL asli
+    streams = await Promise.all(
+      data.streams.map(async (s) => {
+        const rawUrl = s.stream_url || s.url;
+        if (!rawUrl) return { ...s, url: null };
+        try {
+          const decoded = await fetchProxyUrl(rawUrl, tokenData);
+          // decoded bisa berupa URL langsung atau M3U8 text
+          if (decoded.startsWith("http")) {
+            return { ...s, url: decoded };
+          } else if (decoded.startsWith("#EXTM3U")) {
+            const parsed = parseM3U8(decoded);
+            // Ambil stream tertinggi dari playlist sebagai URL utama
+            const best = parsed.streams.sort(
+              (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+            )[0];
+            return { ...s, url: best?.url || rewriteProxyUrl(rawUrl) };
+          } else {
+            return { ...s, url: rewriteProxyUrl(rawUrl) };
+          }
+        } catch {
+          return { ...s, url: rewriteProxyUrl(rawUrl) };
+        }
+      })
+    );
+    // Filter stream yang tidak punya URL
+    streams = streams.filter((s) => s.url);
+
   } else if (data.stream_url) {
-    // Fallback: fetch proxy URL untuk dapat URL asli
+    // Fallback: fetch proxy URL dengan headers untuk dapat URL asli
     try {
       const decoded = await fetchProxyUrl(data.stream_url, tokenData);
-      // Cek apakah decoded adalah URL valid
       if (decoded.startsWith("http")) {
         streams = [{ NAME: "default", BANDWIDTH: "0", url: decoded }];
       } else if (decoded.startsWith("#EXTM3U")) {
-        // Response langsung M3U8 text
         const parsed = parseM3U8(decoded);
         streams = parsed.streams;
       } else {
-        const url = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
-        streams = [{ NAME: "default", BANDWIDTH: "0", url }];
+        streams = [{ NAME: "default", BANDWIDTH: "0", url: rewriteProxyUrl(data.stream_url) }];
       }
     } catch {
-      const url = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
-      streams = [{ NAME: "default", BANDWIDTH: "0", url }];
+      // Fallback terakhir: pakai URL yang sudah di-rewrite tanpa decode
+      streams = [{ NAME: "default", BANDWIDTH: "0", url: rewriteProxyUrl(data.stream_url) }];
     }
   }
 
