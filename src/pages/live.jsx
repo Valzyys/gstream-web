@@ -17,7 +17,7 @@ const isSlugParam = (param) => {
   return /\d{4}-\d{2}-\d{2}/.test(param);
 };
 
-// ── Resolution Selector Component ─────────────────────────────────────────────
+// ── Resolution Selector ────────────────────────────────────────────────────────
 function ResolutionSelector({ streams, currentUrl, onSelect }) {
   if (!streams || streams.length === 0) return null;
 
@@ -166,9 +166,9 @@ function LiveStream() {
   const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
-  const [hlsUrl,          setHlsUrl]          = useState("");
-  const [isSlugMode,      setIsSlugMode]      = useState(false);
-  const [availableStreams, setAvailableStreams] = useState([]);
+  const [hlsUrl,           setHlsUrl]           = useState("");
+  const [isSlugMode,       setIsSlugMode]        = useState(false);
+  const [availableStreams,  setAvailableStreams]  = useState([]);
 
   const [chatMessages,    setChatMessages]    = useState([]);
   const [chatInput,       setChatInput]       = useState("");
@@ -322,80 +322,122 @@ function LiveStream() {
     setLoadingMembers(false);
   };
 
+  // ── Fetch stream: robust fallback chain ───────────────────────────────────
   const fetchSlugStream = async (slug) => {
     try {
-      const res  = await fetch(
+      const res = await fetch(
         `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${slug}`
       );
-      const data = await res.json();
 
-      // Simpan semua stream untuk selector resolusi
-      if (data.success && Array.isArray(data.streams) && data.streams.length > 0) {
-        // Urutkan dari resolusi tertinggi ke terendah berdasarkan bandwidth
-        const sorted = [...data.streams].sort(
-          (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
-        );
+      let data = null;
+      try {
+        data = await res.json();
+      } catch {
+        console.warn("fetchSlugStream: gagal parse JSON response");
+        return null;
+      }
+
+      console.log("fetchSlugStream raw response:", data);
+
+      // Kumpulkan semua stream valid (ada url-nya)
+      const rawStreams = Array.isArray(data?.streams)
+        ? data.streams.filter((s) => s && typeof s.url === "string" && s.url.length > 0)
+        : [];
+
+      // Urutkan bandwidth tertinggi ke terendah
+      const sorted = rawStreams.sort(
+        (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
+      );
+
+      if (sorted.length > 0) {
         setAvailableStreams(sorted);
-
-        // Default: gunakan stream_url (highest quality) jika ada, fallback ke sorted[0]
-        const defaultUrl = data.stream_url || sorted[0].url;
-        return { url: defaultUrl, title: data.slug || slug };
       }
 
-      if (data.success && data.stream_url) {
-        return { url: data.stream_url, title: data.slug || slug };
+      // Prioritas URL: stream_url root → bandwidth tertinggi → stream pertama
+      const defaultUrl =
+        (typeof data?.stream_url === "string" && data.stream_url.length > 0
+          ? data.stream_url
+          : null) ||
+        sorted[0]?.url ||
+        null;
+
+      if (!defaultUrl) {
+        console.warn("fetchSlugStream: tidak ada URL stream ditemukan", data);
+        return null;
       }
 
-      return null;
+      return {
+        url:   defaultUrl,
+        title: data?.slug || slug,
+      };
     } catch (e) {
       console.error("fetchSlugStream error:", e);
       return null;
     }
   };
 
+  // ── Load stream data ──────────────────────────────────────────────────────
   const loadStreamData = useCallback(async () => {
     try {
       setLoading(true);
-      if (!playbackId) { setError("Playback ID tidak ditemukan"); setLoading(false); return; }
+      setError("");
+
+      if (!playbackId) {
+        setError("Playback ID tidak ditemukan");
+        setLoading(false);
+        return;
+      }
 
       const slugMode = isSlugParam(playbackId);
       setIsSlugMode(slugMode);
 
-      const nearestShow = await fetchNearestShow();
-      if (nearestShow) {
-        setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
-        await fetchShowMembers(nearestShow.id);
-      }
+      // Fetch show info — fire-and-forget, tidak blokir stream
+      fetchNearestShow().then((nearestShow) => {
+        if (nearestShow) {
+          setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
+          fetchShowMembers(nearestShow.id);
+        }
+      }).catch(() => {});
 
       if (slugMode) {
-        const result = await fetchSlugStream(playbackId);
+        let result = await fetchSlugStream(playbackId);
+
+        // Retry sekali jika gagal (mungkin API lambat)
+        if (!result || !result.url) {
+          console.warn("fetchSlugStream: retry setelah 2 detik...");
+          await new Promise((r) => setTimeout(r, 2000));
+          result = await fetchSlugStream(playbackId);
+        }
+
         if (!result || !result.url) {
           setError("Gagal mendapatkan stream URL. Stream mungkin sudah berakhir.");
           setLoading(false);
           return;
         }
+
         setHlsUrl(result.url);
         setStreamData({
           playbackId,
-          title:    nearestShow?.title || result.title || "Live Stream JKT48",
+          title:    result.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
       } else {
+        // Mux mode — langsung set streamData
         setStreamData({
           playbackId,
-          title:    nearestShow?.title || "Live Stream JKT48",
+          title:    "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
       }
 
       setLoading(false);
-    } catch {
+    } catch (e) {
+      console.error("loadStreamData error:", e);
       setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
       setLoading(false);
     }
   }, [playbackId]);
 
-  // ── Handler ganti resolusi ─────────────────────────────────────────────────
   const handleResolutionChange = (stream) => {
     if (!stream?.url) return;
     setHlsUrl(stream.url);
@@ -522,6 +564,8 @@ function LiveStream() {
     await channelRef.current.send({ type: "broadcast", event: "pesan_baru", payload });
   };
 
+  // ── Render ────────────────────────────────────────────────────────────────
+
   if (membershipLoading) {
     return (
       <div className="loading-container">
@@ -590,14 +634,35 @@ function LiveStream() {
     );
   }
 
-  if (error || !streamData) {
+  // Error hanya tampil jika benar-benar tidak ada streamData
+  if (error && !streamData) {
     return (
       <div className="error-container">
         <div className="error-content">
           <div className="error-icon"></div>
           <h2>Terjadi Kesalahan</h2>
-          <p>{error || "Tidak dapat memuat live stream"}</p>
+          <p>{error}</p>
+          <button
+            onClick={() => { setError(""); loadStreamData(); }}
+            className="back-button"
+            style={{ marginBottom: "10px" }}
+          >
+            ↺ Coba Lagi
+          </button>
           <button onClick={goBack} className="back-button">← Kembali</button>
+        </div>
+      </div>
+    );
+  }
+
+  // Safeguard: streamData belum siap tapi tidak loading dan tidak error
+  if (!streamData) {
+    return (
+      <div className="loading-container">
+        <div className="loading-content">
+          <div className="spinner-large"></div>
+          <h2>Menghubungkan ke stream...</h2>
+          <p>Mohon tunggu sebentar</p>
         </div>
       </div>
     );
