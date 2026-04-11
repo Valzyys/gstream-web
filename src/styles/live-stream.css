@@ -1130,3 +1130,47 @@ input:-webkit-autofill:focus {
     font-size: 13px;
   }
 }
+
+/* ── Resolution Selector ─────────────────────────────────────────── */
+.resolution-selector {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 10px;
+  background: rgba(0, 0, 0, 0.75);
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
+  flex-wrap: wrap;
+}
+
+.resolution-label {
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.55);
+  margin-right: 2px;
+  white-space: nowrap;
+}
+
+.resolution-btn {
+  background: transparent;
+  border: 1px solid rgba(255, 255, 255, 0.25);
+  color: rgba(255, 255, 255, 0.8);
+  font-size: 11px;
+  font-weight: 500;
+  padding: 3px 9px;
+  border-radius: 4px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+  white-space: nowrap;
+}
+
+.resolution-btn:hover {
+  background: rgba(255, 255, 255, 0.12);
+  border-color: rgba(255, 255, 255, 0.45);
+  color: #fff;
+}
+
+.resolution-btn.active {
+  background: #DC1F2E;
+  border-color: #DC1F2E;
+  color: #fff;
+}
