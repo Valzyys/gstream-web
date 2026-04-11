@@ -5,7 +5,6 @@ import Hls from "hls.js";
 import { createClient } from "@supabase/supabase-js";
 import "../styles/live-stream.css";
 
-// ── KONFIGURASI SUPABASE ──────────────────────────────────────────────────────
 const supabaseUrl = import.meta.env.VITE_SUPABASE_URL || "https://mzxfuaoihgzxvokwarao.supabase.co";
 const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY || "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im16eGZ1YW9paGd6eHZva3dhcmFvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzQ0MDg0NjIsImV4cCI6MjA4OTk4NDQ2Mn0.OFYCkBFXCSfLn-wG94OHHKL5CX8T_BLrbDGPiBdPIog";
 const supabase = createClient(supabaseUrl, supabaseKey);
@@ -13,15 +12,44 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
-// ── Deteksi slug vs Mux playback ID ──────────────────────────────────────────
-// Slug mengandung tanggal format YYYY-MM-DD
 const isSlugParam = (param) => {
   if (!param) return false;
   return /\d{4}-\d{2}-\d{2}/.test(param);
 };
 
-// ── HLS Player (untuk slug mode) ─────────────────────────────────────────────
-function HlsPlayer({ src, title }) {
+// ── Resolution Selector Component ─────────────────────────────────────────────
+function ResolutionSelector({ streams, currentUrl, onSelect }) {
+  if (!streams || streams.length === 0) return null;
+
+  const formatBandwidth = (bw) => {
+    const num = parseInt(bw) || 0;
+    if (num >= 1000000) return (num / 1000000).toFixed(1) + " Mbps";
+    if (num >= 1000) return Math.round(num / 1000) + " Kbps";
+    return num + " bps";
+  };
+
+  return (
+    <div className="resolution-selector">
+      <span className="resolution-label">Resolusi:</span>
+      {streams.map((stream) => {
+        const isActive = currentUrl === stream.url;
+        return (
+          <button
+            key={stream["GROUP-ID"]}
+            className={`resolution-btn${isActive ? " active" : ""}`}
+            onClick={() => onSelect(stream)}
+            title={`${stream.RESOLUTION} @ ${stream["FRAME-RATE"]}fps — ${formatBandwidth(stream.BANDWIDTH)}`}
+          >
+            {stream.NAME}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+// ── HLS Player ─────────────────────────────────────────────────────────────────
+function HlsPlayer({ src, title, streams, onResolutionChange }) {
   const videoRef = useRef(null);
   const hlsRef   = useRef(null);
 
@@ -37,9 +65,9 @@ function HlsPlayer({ src, title }) {
 
       if (Hls.isSupported()) {
         const hls = new Hls({
-          enableWorker:    true,
-          lowLatencyMode:  true,
-          liveSyncDuration: 3,
+          enableWorker:           true,
+          lowLatencyMode:         true,
+          liveSyncDuration:       3,
           liveMaxLatencyDuration: 10,
         });
         hlsRef.current = hls;
@@ -64,7 +92,6 @@ function HlsPlayer({ src, title }) {
           }
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari native HLS
         video.src = src;
         video.addEventListener("loadedmetadata", () => {
           video.play().catch(() => {});
@@ -83,18 +110,28 @@ function HlsPlayer({ src, title }) {
   }, [src]);
 
   return (
-    <video
-      ref={videoRef}
-      controls
-      autoPlay
-      playsInline
-      style={{ width: "100%", height: "100%", background: "#000", borderRadius: "8px" }}
-      title={title}
-    />
+    <div style={{ position: "relative", width: "100%", height: "100%" }}>
+      <video
+        ref={videoRef}
+        controls
+        autoPlay
+        playsInline
+        style={{ width: "100%", height: "100%", background: "#000", borderRadius: "8px" }}
+        title={title}
+      />
+      {streams && streams.length > 0 && (
+        <div style={{ position: "absolute", bottom: "48px", right: "12px", zIndex: 10 }}>
+          <ResolutionSelector
+            streams={streams}
+            currentUrl={src}
+            onSelect={onResolutionChange}
+          />
+        </div>
+      )}
+    </div>
   );
 }
 
-/** Ambil session login */
 const getSession = () => {
   try {
     const d = JSON.parse(
@@ -111,12 +148,10 @@ function LiveStream() {
   const { playbackId } = useParams();
   const navigate       = useNavigate();
 
-  // ── Auth / membership state ───────────────────────────────────────────────
   const [membershipChecked, setMembershipChecked] = useState(false);
   const [hasMonthlymember,  setHasMonthlyMember]  = useState(false);
   const [membershipLoading, setMembershipLoading] = useState(true);
 
-  // ── Verification state ────────────────────────────────────────────────────
   const [isVerified,        setIsVerified]        = useState(false);
   const [showVerification,  setShowVerification]  = useState(false);
   const [verificationData,  setVerificationData]  = useState({ email: "", code: "" });
@@ -124,7 +159,6 @@ function LiveStream() {
   const [verifying,         setVerifying]         = useState(false);
   const [clientIP,          setClientIP]          = useState("");
 
-  // ── Stream state ──────────────────────────────────────────────────────────
   const [loading,        setLoading]        = useState(true);
   const [error,          setError]          = useState("");
   const [streamData,     setStreamData]     = useState(null);
@@ -132,11 +166,10 @@ function LiveStream() {
   const [members,        setMembers]        = useState([]);
   const [loadingMembers, setLoadingMembers] = useState(false);
 
-  // ── Slug / HLS state ──────────────────────────────────────────────────────
-  const [hlsUrl,     setHlsUrl]     = useState("");
-  const [isSlugMode, setIsSlugMode] = useState(false);
+  const [hlsUrl,          setHlsUrl]          = useState("");
+  const [isSlugMode,      setIsSlugMode]      = useState(false);
+  const [availableStreams, setAvailableStreams] = useState([]);
 
-  // ── Chat state ────────────────────────────────────────────────────────────
   const [chatMessages,    setChatMessages]    = useState([]);
   const [chatInput,       setChatInput]       = useState("");
   const [chatUser,        setChatUser]        = useState(null);
@@ -144,7 +177,6 @@ function LiveStream() {
   const chatEndRef  = useRef(null);
   const channelRef  = useRef(null);
 
-  // ── Helpers ───────────────────────────────────────────────────────────────
   const fetchClientIP = async () => {
     try {
       const res  = await fetch("https://api.ipify.org?format=json");
@@ -154,7 +186,6 @@ function LiveStream() {
     } catch { return "unknown"; }
   };
 
-  // ── Cek membership ────────────────────────────────────────────────────────
   const checkMembership = useCallback(async () => {
     setMembershipLoading(true);
     const session = getSession();
@@ -183,7 +214,6 @@ function LiveStream() {
     return false;
   }, []);
 
-  // ── Verification ──────────────────────────────────────────────────────────
   const verifyAccess = async () => {
     if (!verificationData.email || !verificationData.code) {
       setVerificationError("Email dan code wajib diisi"); return;
@@ -265,7 +295,6 @@ function LiveStream() {
     }
   };
 
-  // ── Stream helpers ────────────────────────────────────────────────────────
   const fetchNearestShow = async () => {
     try {
       const res  = await fetch("https://v2.jkt48connect.com/api/jkt48/theater?apikey=JKTCONNECT");
@@ -293,26 +322,28 @@ function LiveStream() {
     setLoadingMembers(false);
   };
 
-  // ── KEY FIX: Fetch stream dari slug API yang benar ────────────────────────
   const fetchSlugStream = async (slug) => {
     try {
-      // Endpoint yang benar sesuai instruksi user
       const res  = await fetch(
         `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${slug}`
       );
       const data = await res.json();
 
-      // Ambil stream_url (resolusi tertinggi / default)
-      if (data.success && data.stream_url) {
-        return { url: data.stream_url, title: data.slug || slug };
+      // Simpan semua stream untuk selector resolusi
+      if (data.success && Array.isArray(data.streams) && data.streams.length > 0) {
+        // Urutkan dari resolusi tertinggi ke terendah berdasarkan bandwidth
+        const sorted = [...data.streams].sort(
+          (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
+        );
+        setAvailableStreams(sorted);
+
+        // Default: gunakan stream_url (highest quality) jika ada, fallback ke sorted[0]
+        const defaultUrl = data.stream_url || sorted[0].url;
+        return { url: defaultUrl, title: data.slug || slug };
       }
 
-      // Fallback: pilih stream dengan bandwidth tertinggi dari streams[]
-      if (data.success && Array.isArray(data.streams) && data.streams.length > 0) {
-        const best = data.streams.reduce((prev, curr) =>
-          parseInt(curr.BANDWIDTH || 0) > parseInt(prev.BANDWIDTH || 0) ? curr : prev
-        );
-        return { url: best.url, title: data.slug || slug };
+      if (data.success && data.stream_url) {
+        return { url: data.stream_url, title: data.slug || slug };
       }
 
       return null;
@@ -322,7 +353,6 @@ function LiveStream() {
     }
   };
 
-  // ── Load stream data ──────────────────────────────────────────────────────
   const loadStreamData = useCallback(async () => {
     try {
       setLoading(true);
@@ -331,7 +361,6 @@ function LiveStream() {
       const slugMode = isSlugParam(playbackId);
       setIsSlugMode(slugMode);
 
-      // Fetch show info & lineup
       const nearestShow = await fetchNearestShow();
       if (nearestShow) {
         setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
@@ -339,7 +368,6 @@ function LiveStream() {
       }
 
       if (slugMode) {
-        // ── SLUG MODE: fetch HLS URL dari API slug ──
         const result = await fetchSlugStream(playbackId);
         if (!result || !result.url) {
           setError("Gagal mendapatkan stream URL. Stream mungkin sudah berakhir.");
@@ -353,7 +381,6 @@ function LiveStream() {
           viewerId: "viewer-" + Date.now(),
         });
       } else {
-        // ── MUX MODE: playbackId langsung ke MuxPlayer ──
         setStreamData({
           playbackId,
           title:    nearestShow?.title || "Live Stream JKT48",
@@ -368,7 +395,12 @@ function LiveStream() {
     }
   }, [playbackId]);
 
-  // ── Init ──────────────────────────────────────────────────────────────────
+  // ── Handler ganti resolusi ─────────────────────────────────────────────────
+  const handleResolutionChange = (stream) => {
+    if (!stream?.url) return;
+    setHlsUrl(stream.url);
+  };
+
   useEffect(() => {
     const init = async () => {
       await fetchClientIP();
@@ -387,7 +419,6 @@ function LiveStream() {
     };
     init();
 
-    // ── Auto login chat ──
     const initChatUser = async () => {
       setIsChatLoggingIn(true);
       let userData = null;
@@ -438,7 +469,6 @@ function LiveStream() {
     };
     initChatUser();
 
-    // ── Supabase Realtime ──
     const channel = supabase.channel(`chat-${playbackId}`, {
       config: { broadcast: { ack: true } },
     });
@@ -462,7 +492,6 @@ function LiveStream() {
     chatEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [chatMessages]);
 
-  // ── Handlers ──────────────────────────────────────────────────────────────
   const handleInputChange        = (e) => {
     const { name, value } = e.target;
     setVerificationData((prev) => ({ ...prev, [name]: value }));
@@ -473,7 +502,7 @@ function LiveStream() {
   const handleLogout             = () => {
     localStorage.removeItem("stream_verification");
     setIsVerified(false); setShowVerification(true);
-    setStreamData(null); setHlsUrl("");
+    setStreamData(null); setHlsUrl(""); setAvailableStreams([]);
     setVerificationData({ email: "", code: "" });
   };
   const handleSendMessage = async (e) => {
@@ -492,10 +521,6 @@ function LiveStream() {
     setChatInput("");
     await channelRef.current.send({ type: "broadcast", event: "pesan_baru", payload });
   };
-
-  // ══════════════════════════════════════════════════════════════════════════
-  // RENDER
-  // ══════════════════════════════════════════════════════════════════════════
 
   if (membershipLoading) {
     return (
@@ -580,7 +605,6 @@ function LiveStream() {
 
   return (
     <div className="live-stream-page">
-      {/* Header */}
       <div className="stream-header">
         <button onClick={goBack} className="back-btn">← Kembali</button>
         {showInfo && <div className="show-title"><span>{showInfo.title}</span></div>}
@@ -594,13 +618,16 @@ function LiveStream() {
         )}
       </div>
 
-      {/* Layout */}
       <div className="stream-layout">
-        {/* KIRI: Player & Members */}
         <div className="main-content">
           <div className="player-container">
             {isSlugMode && hlsUrl ? (
-              <HlsPlayer src={hlsUrl} title={streamData.title} />
+              <HlsPlayer
+                src={hlsUrl}
+                title={streamData.title}
+                streams={availableStreams}
+                onResolutionChange={handleResolutionChange}
+              />
             ) : (
               <MuxPlayer
                 streamType="live"
@@ -635,7 +662,6 @@ function LiveStream() {
           <div className="stream-footer"><p>POWERED BY JKT48Connect</p></div>
         </div>
 
-        {/* KANAN: Chat */}
         <div className="chat-sidebar">
           <div className="chat-header">
             <span>Live Chat</span>
