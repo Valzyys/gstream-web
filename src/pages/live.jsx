@@ -13,8 +13,17 @@ const supabase = createClient(supabaseUrl, supabaseKey);
 const API_BASE = "https://v2.jkt48connect.com/api/jkt48connect";
 const API_KEY  = "JKTCONNECT";
 
+// ─────────────────────────────────────────────────────────────────────────────
+// FORCED LIVE SLUGS
+// Slug yang di-hardcode agar selalu dianggap "live" dan langsung diambil
+// stream URL-nya tanpa peduli status dari API.
+// Tambahkan slug baru di sini jika diperlukan.
+// ─────────────────────────────────────────────────────────────────────────────
+const FORCED_LIVE_SLUGS = new Set([
+  "passion-200-2026-04-11-260408202647",
+]);
+
 // ── Deteksi slug vs Mux playback ID ──────────────────────────────────────────
-// Slug mengandung tanggal format YYYY-MM-DD
 const isSlugParam = (param) => {
   if (!param) return false;
   return /\d{4}-\d{2}-\d{2}/.test(param);
@@ -37,9 +46,9 @@ function HlsPlayer({ src, title }) {
 
       if (Hls.isSupported()) {
         const hls = new Hls({
-          enableWorker:    true,
-          lowLatencyMode:  true,
-          liveSyncDuration: 3,
+          enableWorker:           true,
+          lowLatencyMode:         true,
+          liveSyncDuration:       3,
           liveMaxLatencyDuration: 10,
         });
         hlsRef.current = hls;
@@ -64,7 +73,6 @@ function HlsPlayer({ src, title }) {
           }
         });
       } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
-        // Safari native HLS
         video.src = src;
         video.addEventListener("loadedmetadata", () => {
           video.play().catch(() => {});
@@ -201,7 +209,7 @@ function LiveStream() {
         setVerificationError(verifyData.message || "Code tidak valid atau sudah kedaluwarsa");
         setVerifying(false); return;
       }
-      const codeData = verifyData.data;
+      const codeData          = verifyData.data;
       if (!codeData.is_active) {
         setVerificationError("Code ini sudah tidak aktif"); setVerifying(false); return;
       }
@@ -220,7 +228,10 @@ function LiveStream() {
               setVerificationError("Code ini sudah digunakan dari IP address yang berbeda");
               setVerifying(false); return;
             }
-            localStorage.setItem("stream_verification", JSON.stringify({ email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true }));
+            localStorage.setItem("stream_verification", JSON.stringify({
+              email: verificationData.email, code: verificationData.code,
+              ip, timestamp: Date.now(), verified: true,
+            }));
             setIsVerified(true); setShowVerification(false); setVerifying(false); return;
           }
         }
@@ -233,7 +244,10 @@ function LiveStream() {
       });
       const useData = await useResponse.json();
       if (useData.status) {
-        localStorage.setItem("stream_verification", JSON.stringify({ email: verificationData.email, code: verificationData.code, ip, timestamp: Date.now(), verified: true }));
+        localStorage.setItem("stream_verification", JSON.stringify({
+          email: verificationData.email, code: verificationData.code,
+          ip, timestamp: Date.now(), verified: true,
+        }));
         setIsVerified(true); setShowVerification(false); setVerifying(false);
       } else {
         setVerificationError(useData.message || "Gagal menggunakan code"); setVerifying(false);
@@ -265,7 +279,7 @@ function LiveStream() {
     }
   };
 
-  // ── Stream helpers ────────────────────────────────────────────────────────
+  // ── Show info helpers ─────────────────────────────────────────────────────
   const fetchNearestShow = async () => {
     try {
       const res  = await fetch("https://v2.jkt48connect.com/api/jkt48/theater?apikey=JKTCONNECT");
@@ -293,26 +307,70 @@ function LiveStream() {
     setLoadingMembers(false);
   };
 
-  // ── KEY FIX: Fetch stream dari slug API yang benar ────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // FETCH SLUG STREAM
+  // Logika:
+  // 1. Selalu hit API /live/show?slug=... (karena backend sudah hardcode status
+  //    "live" untuk slug yang ada di FORCED_LIVE_SLUGS di sisi server).
+  // 2. Jika slug ada di FORCED_LIVE_SLUGS frontend, kita tidak akan bail-out
+  //    meski response status bukan "live" — tetap ambil stream_url.
+  // 3. Pilih stream_url terbaik: dari field stream_url, atau streams[]
+  //    dengan BANDWIDTH tertinggi.
+  // ─────────────────────────────────────────────────────────────────────────
   const fetchSlugStream = async (slug) => {
     try {
-      // Endpoint yang benar sesuai instruksi user
+      const isForcedLive = FORCED_LIVE_SLUGS.has(slug);
+
       const res  = await fetch(
-        `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${slug}`
+        `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${encodeURIComponent(slug)}`
       );
       const data = await res.json();
 
-      // Ambil stream_url (resolusi tertinggi / default)
+      // ── Ambil stream_url langsung (sudah dipilihkan backend / best quality) ──
       if (data.success && data.stream_url) {
-        return { url: data.stream_url, title: data.slug || slug };
+        return {
+          url:         data.stream_url,
+          title:       data.slug || slug,
+          isForcedLive,
+        };
       }
 
-      // Fallback: pilih stream dengan bandwidth tertinggi dari streams[]
+      // ── Fallback: pilih dari streams[] dengan BANDWIDTH tertinggi ──
       if (data.success && Array.isArray(data.streams) && data.streams.length > 0) {
-        const best = data.streams.reduce((prev, curr) =>
-          parseInt(curr.BANDWIDTH || 0) > parseInt(prev.BANDWIDTH || 0) ? curr : prev
+        const sorted = [...data.streams].sort(
+          (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
         );
-        return { url: best.url, title: data.slug || slug };
+        const best = sorted[0];
+        if (best?.url) {
+          return {
+            url:         best.url,
+            title:       data.slug || slug,
+            isForcedLive,
+          };
+        }
+      }
+
+      // ── Forced live: jika API tidak return stream_url tapi slug di-force,
+      //    coba lagi sekali setelah 2 detik (mungkin sedang diproses backend) ──
+      if (isForcedLive && !data.stream_url) {
+        console.warn(`[ForcedLive] ${slug}: stream_url kosong, retry dalam 2s…`);
+        await new Promise((r) => setTimeout(r, 2000));
+        const retryRes  = await fetch(
+          `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${encodeURIComponent(slug)}`
+        );
+        const retryData = await retryRes.json();
+
+        if (retryData.success && retryData.stream_url) {
+          return { url: retryData.stream_url, title: retryData.slug || slug, isForcedLive };
+        }
+        if (retryData.success && Array.isArray(retryData.streams) && retryData.streams.length > 0) {
+          const sorted = [...retryData.streams].sort(
+            (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
+          );
+          if (sorted[0]?.url) {
+            return { url: sorted[0].url, title: retryData.slug || slug, isForcedLive };
+          }
+        }
       }
 
       return null;
@@ -331,7 +389,6 @@ function LiveStream() {
       const slugMode = isSlugParam(playbackId);
       setIsSlugMode(slugMode);
 
-      // Fetch show info & lineup
       const nearestShow = await fetchNearestShow();
       if (nearestShow) {
         setShowInfo({ title: nearestShow.title, showId: nearestShow.id });
@@ -339,25 +396,31 @@ function LiveStream() {
       }
 
       if (slugMode) {
-        // ── SLUG MODE: fetch HLS URL dari API slug ──
         const result = await fetchSlugStream(playbackId);
         if (!result || !result.url) {
-          setError("Gagal mendapatkan stream URL. Stream mungkin sudah berakhir.");
+          // Jika slug ada di forced list tapi masih gagal → beri pesan khusus
+          if (FORCED_LIVE_SLUGS.has(playbackId)) {
+            setError("Show sedang disiapkan. Silakan refresh dalam beberapa saat.");
+          } else {
+            setError("Gagal mendapatkan stream URL. Stream mungkin sudah berakhir.");
+          }
           setLoading(false);
           return;
         }
         setHlsUrl(result.url);
         setStreamData({
           playbackId,
-          title:    nearestShow?.title || result.title || "Live Stream JKT48",
-          viewerId: "viewer-" + Date.now(),
+          title:       nearestShow?.title || result.title || "Live Stream JKT48",
+          viewerId:    "viewer-" + Date.now(),
+          isForcedLive: result.isForcedLive,
         });
       } else {
-        // ── MUX MODE: playbackId langsung ke MuxPlayer ──
+        // MUX mode
         setStreamData({
           playbackId,
           title:    nearestShow?.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
+          isForcedLive: false,
         });
       }
 
@@ -366,7 +429,7 @@ function LiveStream() {
       setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
       setLoading(false);
     }
-  }, [playbackId]);
+  }, [playbackId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Init ──────────────────────────────────────────────────────────────────
   useEffect(() => {
@@ -430,7 +493,13 @@ function LiveStream() {
           if (!error && supabaseUser) {
             setChatUser({ ...supabaseUser, avatar_url });
           } else {
-            setChatUser({ id: userData.user_id || username, username: username.toLowerCase(), avatar_url, role: "member", bluetick: false });
+            setChatUser({
+              id: userData.user_id || username,
+              username: username.toLowerCase(),
+              avatar_url,
+              role: "member",
+              bluetick: false,
+            });
           }
         } catch (e) { console.error("Gagal auto register/login chat", e); }
       }
@@ -445,7 +514,9 @@ function LiveStream() {
     channel
       .on("broadcast", { event: "pesan_baru" }, ({ payload }) => {
         setChatMessages((prev) => {
-          const exists = prev.some(m => m.timestamp === payload.timestamp && m.username === payload.username);
+          const exists = prev.some(
+            (m) => m.timestamp === payload.timestamp && m.username === payload.username
+          );
           return exists ? prev : [...prev, payload];
         });
       })
@@ -493,6 +564,14 @@ function LiveStream() {
     await channelRef.current.send({ type: "broadcast", event: "pesan_baru", payload });
   };
 
+  // ── Retry handler khusus forced live ─────────────────────────────────────
+  const handleRetry = () => {
+    setError("");
+    setStreamData(null);
+    setHlsUrl("");
+    loadStreamData();
+  };
+
   // ══════════════════════════════════════════════════════════════════════════
   // RENDER
   // ══════════════════════════════════════════════════════════════════════════
@@ -519,11 +598,23 @@ function LiveStream() {
             <form onSubmit={handleVerificationSubmit}>
               <div className="form-group">
                 <label>Email</label>
-                <input type="email" name="email" value={verificationData.email} onChange={handleInputChange} placeholder="email@example.com" required />
+                <input
+                  type="email" name="email"
+                  value={verificationData.email}
+                  onChange={handleInputChange}
+                  placeholder="email@example.com"
+                  required
+                />
               </div>
               <div className="form-group">
                 <label>Verification Code</label>
-                <input type="text" name="code" value={verificationData.code} onChange={handleInputChange} placeholder="Masukkan code" required />
+                <input
+                  type="text" name="code"
+                  value={verificationData.code}
+                  onChange={handleInputChange}
+                  placeholder="Masukkan code"
+                  required
+                />
               </div>
               {verificationError && <div className="error-message">{verificationError}</div>}
               {verifying
@@ -559,7 +650,11 @@ function LiveStream() {
         <div className="loading-content">
           <div className="spinner-large"></div>
           <h2>Memuat live stream...</h2>
-          <p>Mengambil informasi show...</p>
+          <p>
+            {FORCED_LIVE_SLUGS.has(playbackId)
+              ? "Mengambil stream dari server IDN Live…"
+              : "Mengambil informasi show..."}
+          </p>
         </div>
       </div>
     );
@@ -572,7 +667,15 @@ function LiveStream() {
           <div className="error-icon"></div>
           <h2>Terjadi Kesalahan</h2>
           <p>{error || "Tidak dapat memuat live stream"}</p>
-          <button onClick={goBack} className="back-button">← Kembali</button>
+          <div style={{ display: "flex", gap: "12px", justifyContent: "center", marginTop: "12px" }}>
+            {/* Tampilkan tombol retry jika slug adalah forced live */}
+            {FORCED_LIVE_SLUGS.has(playbackId) && (
+              <button onClick={handleRetry} className="verify-button" style={{ padding: "10px 20px" }}>
+                ↻ Coba Lagi
+              </button>
+            )}
+            <button onClick={goBack} className="back-button">← Kembali</button>
+          </div>
         </div>
       </div>
     );
@@ -584,14 +687,37 @@ function LiveStream() {
       <div className="stream-header">
         <button onClick={goBack} className="back-btn">← Kembali</button>
         {showInfo && <div className="show-title"><span>{showInfo.title}</span></div>}
-        {!hasMonthlymember && (
-          <button onClick={handleLogout} className="logout-btn">Logout</button>
-        )}
-        {hasMonthlymember && (
-          <div style={{ display: "flex", alignItems: "center", gap: "6px", background: "#DC1F2E18", border: "1px solid #DC1F2E40", borderRadius: "20px", padding: "4px 12px", fontSize: "12px", fontWeight: 700, color: "#DC1F2E" }}>
-            ★ MONTHLY
-          </div>
-        )}
+        <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+          {/* Badge forced live */}
+          {streamData?.isForcedLive && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: "5px",
+              background: "#22c55e18", border: "1px solid #22c55e44",
+              borderRadius: "20px", padding: "4px 10px",
+              fontSize: "11px", fontWeight: 700, color: "#22c55e",
+            }}>
+              <span style={{
+                width: 6, height: 6, borderRadius: "50%",
+                background: "#22c55e", display: "inline-block",
+                animation: "pulse 1.5s infinite",
+              }} />
+              LIVE
+            </div>
+          )}
+          {!hasMonthlymember && (
+            <button onClick={handleLogout} className="logout-btn">Logout</button>
+          )}
+          {hasMonthlymember && (
+            <div style={{
+              display: "flex", alignItems: "center", gap: "6px",
+              background: "#DC1F2E18", border: "1px solid #DC1F2E40",
+              borderRadius: "20px", padding: "4px 12px",
+              fontSize: "12px", fontWeight: 700, color: "#DC1F2E",
+            }}>
+              ★ MONTHLY
+            </div>
+          )}
+        </div>
       </div>
 
       {/* Layout */}
@@ -618,7 +744,10 @@ function LiveStream() {
                 <span className="member-count">{members.length} Member</span>
               </div>
               {loadingMembers ? (
-                <div className="members-loading"><div className="spinner"></div><p>Memuat lineup...</p></div>
+                <div className="members-loading">
+                  <div className="spinner"></div>
+                  <p>Memuat lineup...</p>
+                </div>
               ) : (
                 <div className="members-grid">
                   {members.map((member) => (
