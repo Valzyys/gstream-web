@@ -9,22 +9,15 @@ const API_KEY          = "JKTCONNECT";
 const PLAYLIST_POLL_MS = 3_000;
 
 // ─── Server 2 Constants ───────────────────────────────────────────────────────
-const HANABIRA_TOKEN_API = "https://hanabira48.com/api/stream-token";
-const HANABIRA_ORIGIN    = "https://stream.hanabira48.com";
-const STREAM2_API        = `${API_BASE}/live/stream`;
-const STREAM2_SHOW_ID    = "SH86F5";
+const STREAM2_API     = `${API_BASE}/live/stream`;
+const STREAM2_SHOW_ID = "SH1D7B";
 
 // ─── Proxy Constants ──────────────────────────────────────────────────────────
 const STREAM_PROXY_BASE = "https://stream.jkt48connect.com/hls/";
 
 // ─── Proxy Helper ─────────────────────────────────────────────────────────────
-/**
- * Membungkus decoded stream URL melalui proxy:
- * https://stream.jkt48connect.com/hls/{encoded_url}
- */
 function proxyStreamUrl(url) {
   if (!url) return url;
-  // Jangan proxy ulang kalau sudah melalui proxy yang sama
   if (url.startsWith(STREAM_PROXY_BASE)) return url;
   return STREAM_PROXY_BASE + encodeURIComponent(url);
 }
@@ -112,95 +105,23 @@ function resolveStreamResponse(data) {
   return { session: {}, streams: [], raw: data };
 }
 
-// ─── Rewrite proxy domain ke idn.jkt48connect.com ────────────────────────────
-function rewriteProxyUrl(url) {
-  if (!url) return url;
-  return url.replace(
-    /https:\/\/proxy\.mediastream48\.workers\.dev/g,
-    "https://idn.jkt48connect.com"
-  );
-}
-
-// ─── Server 2 helpers ─────────────────────────────────────────────────────────
-async function fetchHanabiraToken(showId = STREAM2_SHOW_ID) {
-  const res  = await fetch(`${HANABIRA_TOKEN_API}?showId=${encodeURIComponent(showId)}`);
-  const json = await res.json();
-  if (!json.success || !json.data) throw new Error("Token gagal: " + JSON.stringify(json));
-  return json.data; // { apiToken, tokenId, secKey, showId }
-}
-
-function buildHanabiraHeaders(tokenData) {
-  const { apiToken, tokenId, secKey, showId } = tokenData;
-  return {
-    "Accept":          "*/*",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Connection":      "keep-alive",
-    "Origin":          HANABIRA_ORIGIN,
-    "Referer":         HANABIRA_ORIGIN + "/",
-    "x-api-token":     apiToken,
-    "x-sec-key":       secKey,
-    "x-showid":        showId,
-    "x-token-id":      tokenId,
-  };
-}
-
-// Step 2: Hit JKT48Connect stream API dengan headers token
-async function fetchStream2Data(tokenData) {
-  const headers = buildHanabiraHeaders(tokenData);
-  const res = await fetch(
-    `${STREAM2_API}?apikey=${API_KEY}&showId=${encodeURIComponent(STREAM2_SHOW_ID)}`,
-    { method: "GET", headers }
-  );
+// ─── Server 2: Direct fetch dari JKT48Connect stream API ─────────────────────
+async function fetchStream2Direct(showId = STREAM2_SHOW_ID) {
+  const url = `${STREAM2_API}?apikey=${API_KEY}&showId=${encodeURIComponent(showId)}`;
+  const res = await fetch(url);
   if (!res.ok) throw new Error(`Stream2 HTTP ${res.status}`);
-  return await res.json();
-}
-
-// Step 3: Fetch proxy URL (stream_url) dengan headers token → dapat text (URL M3U8 asli)
-async function fetchProxyUrl(proxyUrl, tokenData) {
-  const rewritten = rewriteProxyUrl(proxyUrl);
-  const headers   = buildHanabiraHeaders(tokenData);
-  const res = await fetch(rewritten, { method: "GET", headers });
-  if (!res.ok) throw new Error(`Proxy fetch HTTP ${res.status}`);
-  return (await res.text()).trim();
-}
-
-async function resolveStream2(tokenData) {
-  // Step 2: Ambil data stream dari JKT48Connect API
-  const data = await fetchStream2Data(tokenData);
+  const data = await res.json();
 
   if (!data.success) throw new Error(data.message || "Stream2 API error");
 
   let streams = [];
 
   if (Array.isArray(data.streams) && data.streams.length) {
-    // API sudah return streams[] — gunakan stream_url_decoded sebagai URL putar
-    // lalu wrap melalui proxy stream.jkt48connect.com/hls/{encoded}
-    streams = data.streams.map((s) => {
-      const decodedUrl = s.stream_url_decoded || rewriteProxyUrl(s.url);
-      return {
-        ...s,
-        url: proxyStreamUrl(decodedUrl),
-      };
-    });
+    streams = [...data.streams].sort(
+      (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
+    );
   } else if (data.stream_url) {
-    // Fallback: fetch proxy URL untuk dapat URL asli
-    try {
-      const decoded = await fetchProxyUrl(data.stream_url, tokenData);
-      // Cek apakah decoded adalah URL valid
-      if (decoded.startsWith("http")) {
-        streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(decoded) }];
-      } else if (decoded.startsWith("#EXTM3U")) {
-        // Response langsung M3U8 text — proxy tiap stream entry
-        const parsed = parseM3U8(decoded);
-        streams = parsed.streams.map((s) => ({ ...s, url: proxyStreamUrl(s.url) }));
-      } else {
-        const rawUrl = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
-        streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(rawUrl) }];
-      }
-    } catch {
-      const rawUrl = data.stream_url_decoded || rewriteProxyUrl(data.stream_url);
-      streams = [{ NAME: "default", BANDWIDTH: "0", url: proxyStreamUrl(rawUrl) }];
-    }
+    streams = [{ NAME: "default", BANDWIDTH: "0", url: data.stream_url }];
   }
 
   if (!streams.length) throw new Error("Server 2: tidak ada stream URL ditemukan");
@@ -208,7 +129,8 @@ async function resolveStream2(tokenData) {
   return {
     streams,
     session: data.session || {},
-    tokenData,
+    showId: data.showId || showId,
+    tokenId: data.tokenId || null,
   };
 }
 
@@ -343,7 +265,7 @@ function HLSPlayer({ src, title, pollUrl }) {
         }}>
           <span style={{ fontSize: 36 }}>⚠️</span>
           <span style={{ color: "#DC1F2E", fontWeight: 700 }}>Gagal memuat stream</span>
-          <span style={{ color: "#555", fontSize: 12 }}>Coba refresh atau pilih slug lain</span>
+          <span style={{ color: "#555", fontSize: 12 }}>Coba refresh atau pilih kualitas lain</span>
         </div>
       )}
       <video
@@ -406,7 +328,9 @@ export default function AdminLive() {
   const [streamError,   setStreamError]   = useState("");
   const [activeStream,  setActiveStream]  = useState(null);
 
-  const stream2TokenRef  = useRef(null);
+  // Server 2 extra info
+  const [stream2Info,   setStream2Info]   = useState(null);
+
   const activeStreamRef  = useRef(null);
   const selectedSlugRef  = useRef(null);
   const activeServerRef  = useRef(1);
@@ -441,21 +365,15 @@ export default function AdminLive() {
   useEffect(() => { if (authed) fetchShows(); }, [authed, fetchShows]);
 
   // ── Server 1: Fetch stream dari JKTConnect API ────────────────────────────
-  // Untuk Server 1, stream_url_decoded juga di-proxy
   const fetchStreamFromApi = useCallback(async (slug) => {
     const res      = await fetch(`${API_BASE}/live/show?slug=${encodeURIComponent(slug)}&apikey=${API_KEY}`);
     const raw      = await res.json();
     const resolved = resolveStreamResponse(raw);
     if (!resolved.streams.length) return null;
 
-    // Wrap decoded URL melalui proxy untuk semua stream Server 1
     const proxiedStreams = resolved.streams.map((s) => {
-      // Gunakan stream_url_decoded jika tersedia, lalu proxy
       const decodedUrl = s.stream_url_decoded || s.url;
-      return {
-        ...s,
-        url: proxyStreamUrl(decodedUrl),
-      };
+      return { ...s, url: proxyStreamUrl(decodedUrl) };
     });
 
     const sorted = [...proxiedStreams].sort(
@@ -464,15 +382,16 @@ export default function AdminLive() {
     return { streams: proxiedStreams, session: resolved.session, sorted };
   }, []);
 
-  // ── Server 2: Token hanabira + stream JKT48Connect API ───────────────────
+  // ── Server 2: Direct fetch ────────────────────────────────────────────────
   const fetchStream2 = useCallback(async () => {
-    const tokenData = await fetchHanabiraToken(STREAM2_SHOW_ID);
-    stream2TokenRef.current = tokenData;
-    const result = await resolveStream2(tokenData);
-    const sorted = [...result.streams].sort(
-      (a, b) => Number(b.BANDWIDTH || 0) - Number(a.BANDWIDTH || 0)
-    );
-    return { streams: result.streams, session: result.session || {}, sorted, tokenData };
+    const result = await fetchStream2Direct(STREAM2_SHOW_ID);
+    return {
+      streams: result.streams,
+      session: result.session,
+      sorted:  result.streams,
+      showId:  result.showId,
+      tokenId: result.tokenId,
+    };
   }, []);
 
   // ── pollUrl Server 1 ──────────────────────────────────────────────────────
@@ -492,17 +411,16 @@ export default function AdminLive() {
   const pollUrlServer2 = useCallback(async () => {
     if (activeServerRef.current !== 2) return null;
     try {
-      const result = await fetchStream2();
-      if (!result) return null;
+      const result = await fetchStream2Direct(STREAM2_SHOW_ID);
       const currentName = activeStreamRef.current?.NAME;
       const match  = result.streams.find((s) => s.NAME === currentName);
-      const target = match || result.sorted[0];
+      const target = match || result.streams[0];
       setStreamData({ streams: result.streams, session: result.session });
       return target?.url ?? null;
     } catch {
       return null;
     }
-  }, [fetchStream2]);
+  }, []);
 
   const pollUrl = activeServer === 2 ? pollUrlServer2 : pollUrlServer1;
 
@@ -521,11 +439,18 @@ export default function AdminLive() {
       setStreamError("");
       setStreamData(null);
       setActiveStream(null);
+      setStream2Info(null);
 
       try {
         let result;
         if (activeServer === 2) {
           result = await fetchStream2();
+          if (!cancelled) {
+            setStream2Info({
+              showId:  result.showId,
+              tokenId: result.tokenId,
+            });
+          }
         } else {
           if (!selectedSlug) { setStreamLoading(false); return; }
           result = await fetchStreamFromApi(selectedSlug);
@@ -565,7 +490,7 @@ export default function AdminLive() {
     setStreamData(null);
     setActiveStream(null);
     setStreamError("");
-    stream2TokenRef.current = null;
+    setStream2Info(null);
   };
 
   // ── Retry ─────────────────────────────────────────────────────────────────
@@ -574,7 +499,7 @@ export default function AdminLive() {
       setStreamData(null);
       setActiveStream(null);
       setStreamError("");
-      stream2TokenRef.current = null;
+      setStream2Info(null);
       const sv = activeServer;
       setActiveServer(0);
       setTimeout(() => setActiveServer(sv), 50);
@@ -607,7 +532,7 @@ export default function AdminLive() {
     setShows([]);
     setStreamData(null);
     setSelectedSlug(null);
-    stream2TokenRef.current = null;
+    setStream2Info(null);
     selectedSlugRef.current = null;
     activeStreamRef.current = null;
   };
@@ -778,18 +703,37 @@ export default function AdminLive() {
                 {activeServer === 2 && (
                   <div className="al-meta-bar">
                     <div className="al-s2-icon">📡</div>
-                    <div>
+                    <div style={{ flex: 1, minWidth: 0 }}>
                       <h1 className="al-stream-title">IDN Live Stream</h1>
                       <span className="al-stream-sub">
                         Show ID:&nbsp;
-                        <code style={{ fontFamily: "var(--mono)", color: "var(--accent2)" }}>{STREAM2_SHOW_ID}</code>
+                        <code style={{ fontFamily: "var(--mono)", color: "var(--accent2)" }}>
+                          {stream2Info?.showId || STREAM2_SHOW_ID}
+                        </code>
                         &nbsp;·&nbsp;
                         {streamLoading
                           ? "Mengambil stream…"
                           : streamData
                           ? <><span className="al-dot live" /> Stream aktif</>
-                          : "—"}
+                          : "Menunggu…"}
                       </span>
+                      {/* Token ID info */}
+                      {stream2Info?.tokenId && (
+                        <span className="al-stream-sub" style={{ fontSize: 10, marginTop: 3, opacity: 0.7 }}>
+                          Token:&nbsp;
+                          <code style={{ fontFamily: "var(--mono)" }}>
+                            {stream2Info.tokenId.slice(0, 8)}…
+                          </code>
+                        </span>
+                      )}
+                      {/* Session broadcast info */}
+                      {streamData?.session?.["BROADCAST-ID"] && (
+                        <span className="al-stream-sub" style={{ fontSize: 10, marginTop: 2, opacity: 0.6 }}>
+                          Broadcast: {streamData.session["BROADCAST-ID"]}
+                          {streamData.session["CLUSTER"] && ` · ${streamData.session["CLUSTER"]}`}
+                          {streamData.session["USER-COUNTRY"] && ` · ${streamData.session["USER-COUNTRY"]}`}
+                        </span>
+                      )}
                     </div>
                     <div className="al-price-badge" style={{ borderColor: "#3b82f644", color: "#3b82f6", background: "#3b82f611" }}>
                       📡 SERVER 2
@@ -805,6 +749,11 @@ export default function AdminLive() {
                     <div className="al-stream-loading">
                       <div className="al-spin xl" />
                       <p>Mengambil stream URL…</p>
+                      {activeServer === 2 && (
+                        <span style={{ color: "#444", fontSize: 12, marginTop: 4 }}>
+                          Menghubungi endpoint stream…
+                        </span>
+                      )}
                     </div>
                   )}
 
@@ -820,9 +769,13 @@ export default function AdminLive() {
 
                   {!streamLoading && !streamError && activeStream?.url && (
                     <HLSPlayer
-                      key={`${activeServer}-${selectedSlug}`}
+                      key={`${activeServer}-${selectedSlug || STREAM2_SHOW_ID}`}
                       src={activeStream.url}
-                      title={activeServer === 2 ? `IDN Live – ${STREAM2_SHOW_ID}` : (selectedShow?.title || selectedSlug)}
+                      title={
+                        activeServer === 2
+                          ? `IDN Live – ${stream2Info?.showId || STREAM2_SHOW_ID}`
+                          : (selectedShow?.title || selectedSlug)
+                      }
                       pollUrl={pollUrl}
                     />
                   )}
@@ -832,7 +785,9 @@ export default function AdminLive() {
                       <span style={{ fontSize: 36 }}>📭</span>
                       <p>Stream URL tidak tersedia.</p>
                       <span style={{ color: "#555", fontSize: 12 }}>
-                        {activeServer === 2 ? "Show ID: " + STREAM2_SHOW_ID : "Status: " + selectedShow?.status}
+                        {activeServer === 2
+                          ? "Show ID: " + (stream2Info?.showId || STREAM2_SHOW_ID)
+                          : "Status: " + selectedShow?.status}
                       </span>
                     </div>
                   )}
@@ -889,6 +844,21 @@ export default function AdminLive() {
                   </div>
                 )}
 
+                {/* Stream URL row (server 2) */}
+                {activeServer === 2 && activeStream?.url && (
+                  <div className="al-slug-row">
+                    <span className="al-slug-label">Stream URL:</span>
+                    <code className="al-slug-code">{activeStream.url}</code>
+                    <button
+                      className="al-btn-ghost sm"
+                      onClick={() => navigator.clipboard?.writeText(activeStream.url)}
+                      title="Copy URL"
+                    >
+                      📋
+                    </button>
+                  </div>
+                )}
+
                 {activeServer === 1 && selectedShow?.idnliveplus?.description && (
                   <div className="al-desc">
                     <h4>Deskripsi</h4>
@@ -920,7 +890,7 @@ export default function AdminLive() {
                     <HLSPlayer
                       key="server2-noshow"
                       src={activeStream.url}
-                      title={`IDN Live – ${STREAM2_SHOW_ID}`}
+                      title={`IDN Live – ${stream2Info?.showId || STREAM2_SHOW_ID}`}
                       pollUrl={pollUrl}
                     />
                   )}
@@ -1025,11 +995,11 @@ const globalStyles = `
 
   .al-main { flex: 1; padding: 24px; overflow-y: auto; display: flex; flex-direction: column; gap: 16px; animation: fadeIn .3s ease; }
   .al-no-select { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; color: var(--txt3); font-size: 15px; text-align: center; padding: 60px 0; }
-  .al-meta-bar { display: flex; align-items: center; gap: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
+  .al-meta-bar { display: flex; align-items: flex-start; gap: 14px; background: var(--bg2); border: 1px solid var(--line); border-radius: 12px; padding: 14px 18px; }
   .al-creator-img { width: 44px; height: 44px; border-radius: 50%; object-fit: cover; flex-shrink: 0; border: 2px solid var(--line); }
   .al-s2-icon { width: 44px; height: 44px; border-radius: 50%; background: var(--a2-dim); border: 2px solid var(--a2-mid); display: flex; align-items: center; justify-content: center; font-size: 22px; flex-shrink: 0; animation: bluePulse 2s infinite; }
   .al-stream-title { font-family: var(--display); font-size: 16px; font-weight: 800; color: var(--txt); line-height: 1.2; }
-  .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; }
+  .al-stream-sub { display: flex; align-items: center; gap: 6px; color: var(--txt2); font-size: 12px; font-family: var(--mono); margin-top: 4px; flex-wrap: wrap; }
   .al-price-badge { margin-left: auto; flex-shrink: 0; background: #f59e0b22; border: 1px solid #f59e0b44; color: #f59e0b; font-size: 12px; font-weight: 700; padding: 4px 12px; border-radius: 20px; font-family: var(--mono); }
   .al-player-wrap { border-radius: 12px; overflow: hidden; background: #000; border: 1px solid var(--line); min-height: 200px; position: relative; }
   .al-stream-loading, .al-stream-err { min-height: 320px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; color: var(--txt2); font-size: 14px; background: var(--bg3); }
@@ -1053,7 +1023,6 @@ const globalStyles = `
   .al-desc h4 { font-size: 11px; font-weight: 700; letter-spacing: 1.5px; color: var(--txt3); text-transform: uppercase; margin-bottom: 8px; }
   .al-desc p { font-size: 13px; color: var(--txt2); line-height: 1.7; white-space: pre-line; }
 
-  /* ── Server Toggle ─────────────────────────────────────────────────────── */
   .al-server-toggle { display: flex; align-items: center; gap: 12px; background: var(--bg2); border: 1px solid var(--line); border-radius: 10px; padding: 10px 16px; }
   .al-server-label { color: var(--txt3); font-size: 11px; letter-spacing: 1px; text-transform: uppercase; font-family: var(--mono); flex-shrink: 0; }
   .al-server-pills { display: flex; gap: 8px; flex-wrap: wrap; }
