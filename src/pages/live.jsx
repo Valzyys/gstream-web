@@ -14,7 +14,11 @@ const API_KEY  = "JKTCONNECT";
 
 const isSlugParam = (param) => {
   if (!param) return false;
-  return /\d{4}-\d{2}-\d{2}/.test(param);
+  // Format date slug: 2024-01-01
+  if (/\d{4}-\d{2}-\d{2}/.test(param)) return true;
+  // Format showId: SH3401, SH0001, dsb
+  if (/^SH\d+$/i.test(param)) return true;
+  return false;
 };
 
 // ── Resolution Selector ────────────────────────────────────────────────────────
@@ -322,22 +326,27 @@ function LiveStream() {
     setLoadingMembers(false);
   };
 
-  // ── Fetch stream: robust fallback chain ───────────────────────────────────
-  const fetchSlugStream = async (slug) => {
+  // ── Fetch stream via /live/stream?showId= ────────────────────────────────
+  const fetchShowStream = async (showId) => {
     try {
       const res = await fetch(
-        `https://v2.jkt48connect.com/api/jkt48/live/show?apikey=${API_KEY}&slug=${slug}`
+        `https://v2.jkt48connect.com/api/jkt48/live/stream?apikey=${API_KEY}&showId=${showId}`
       );
 
       let data = null;
       try {
         data = await res.json();
       } catch {
-        console.warn("fetchSlugStream: gagal parse JSON response");
+        console.warn("fetchShowStream: gagal parse JSON response");
         return null;
       }
 
-      console.log("fetchSlugStream raw response:", data);
+      console.log("fetchShowStream raw response:", data);
+
+      if (!data?.success) {
+        console.warn("fetchShowStream: API returned success=false", data);
+        return null;
+      }
 
       // Kumpulkan semua stream valid (ada url-nya)
       const rawStreams = Array.isArray(data?.streams)
@@ -362,16 +371,18 @@ function LiveStream() {
         null;
 
       if (!defaultUrl) {
-        console.warn("fetchSlugStream: tidak ada URL stream ditemukan", data);
+        console.warn("fetchShowStream: tidak ada URL stream ditemukan", data);
         return null;
       }
 
       return {
-        url:   defaultUrl,
-        title: data?.slug || slug,
+        url:     defaultUrl,
+        title:   data?.showId || showId,
+        showId:  data?.showId,
+        tokenId: data?.tokenId,
       };
     } catch (e) {
-      console.error("fetchSlugStream error:", e);
+      console.error("fetchShowStream error:", e);
       return null;
     }
   };
@@ -400,13 +411,16 @@ function LiveStream() {
       }).catch(() => {});
 
       if (slugMode) {
-        let result = await fetchSlugStream(playbackId);
+        // ShowId di-hardcode
+        const showId = "SH3401";
+
+        let result = await fetchShowStream(showId);
 
         // Retry sekali jika gagal (mungkin API lambat)
         if (!result || !result.url) {
-          console.warn("fetchSlugStream: retry setelah 2 detik...");
+          console.warn("fetchShowStream: retry setelah 2 detik...");
           await new Promise((r) => setTimeout(r, 2000));
-          result = await fetchSlugStream(playbackId);
+          result = await fetchShowStream(showId);
         }
 
         if (!result || !result.url) {
@@ -421,6 +435,11 @@ function LiveStream() {
           title:    result.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
+
+        // Update show info dari hasil API jika ada
+        if (result.showId) {
+          fetchShowMembers(result.showId);
+        }
       } else {
         // Mux mode — langsung set streamData
         setStreamData({
