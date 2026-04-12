@@ -699,7 +699,11 @@ function NextShowSection() {
           return !idnKeys.has(key);
         });
 
-        setShows(deduped.map((s) => normalizeShow(s, "theater")));
+        setShows(
+  deduped
+    .map((s) => normalizeShow(s, "theater"))
+    .filter((s) => s.status !== "past")
+);
         setSource("theater");
       } catch (e) {
         console.error("Error in fetchShows:", e);
