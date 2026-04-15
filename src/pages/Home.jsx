@@ -657,8 +657,11 @@ function NextShowSection() {
           const res = await fetch(IDN_PLUS_API);
           const data = await res.json();
           if (data.status === 200 && Array.isArray(data.data) && data.data.length > 0) {
-            idnShows = data.data;
-          }
+  idnShows = data.data.filter((s) => {
+    const creatorName = (s.creator?.name || "").toLowerCase();
+    return creatorName.includes("jkt48") || creatorName.includes("jkt 48");
+  });
+}
         } catch (e) {
           console.error("Error fetching IDN Plus:", e);
         }
