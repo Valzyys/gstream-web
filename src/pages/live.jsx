@@ -14,9 +14,7 @@ const API_KEY  = "JKTCONNECT";
 
 const isSlugParam = (param) => {
   if (!param) return false;
-  // Format date slug: 2024-01-01
   if (/\d{4}-\d{2}-\d{2}/.test(param)) return true;
-  // Format showId: SH3401, SH0001, dsb
   if (/^SH\d+$/i.test(param)) return true;
   return false;
 };
@@ -174,6 +172,10 @@ function LiveStream() {
   const [isSlugMode,       setIsSlugMode]        = useState(false);
   const [availableStreams,  setAvailableStreams]  = useState([]);
 
+  // ── State baru untuk IDN Plus live show ──────────────────────────────────
+  const [idnLiveShow,      setIdnLiveShow]      = useState(null);
+  const [fetchingIdnShow,  setFetchingIdnShow]  = useState(false);
+
   const [chatMessages,    setChatMessages]    = useState([]);
   const [chatInput,       setChatInput]       = useState("");
   const [chatUser,        setChatUser]        = useState(null);
@@ -216,6 +218,47 @@ function LiveStream() {
     } catch (e) { console.error("Error checking membership:", e); }
     setHasMonthlyMember(false); setMembershipChecked(true); setMembershipLoading(false);
     return false;
+  }, []);
+
+  // ── Fetch live showId dari IDN Plus API ──────────────────────────────────
+  const fetchIdnPlusLiveShowId = useCallback(async () => {
+    setFetchingIdnShow(true);
+    try {
+      const res  = await fetch(
+        `https://v2.jkt48connect.com/api/jkt48/idnplus?apikey=${API_KEY}`
+      );
+      const data = await res.json();
+
+      console.log("IDN Plus API response:", data);
+
+      if (!data || data.status !== 200 || !Array.isArray(data.data)) {
+        console.warn("fetchIdnPlusLiveShowId: response tidak valid", data);
+        setFetchingIdnShow(false);
+        return null;
+      }
+
+      // Cari show dengan status "live"
+      const liveShow = data.data.find((show) => show.status === "live");
+
+      if (!liveShow) {
+        console.warn("fetchIdnPlusLiveShowId: tidak ada show yang sedang live");
+        setFetchingIdnShow(false);
+        return null;
+      }
+
+      console.log("IDN Plus live show ditemukan:", liveShow);
+
+      // Simpan info show untuk ditampilkan di UI
+      setIdnLiveShow(liveShow);
+      setFetchingIdnShow(false);
+
+      // Kembalikan showId
+      return liveShow.showId || null;
+    } catch (e) {
+      console.error("fetchIdnPlusLiveShowId error:", e);
+      setFetchingIdnShow(false);
+      return null;
+    }
   }, []);
 
   const verifyAccess = async () => {
@@ -277,7 +320,7 @@ function LiveStream() {
     }
   };
 
-  const checkExistingVerification = async () => {
+    const checkExistingVerification = async () => {
     const stored = localStorage.getItem("stream_verification");
     if (!stored) { setShowVerification(true); return false; }
     try {
@@ -348,12 +391,10 @@ function LiveStream() {
         return null;
       }
 
-      // Kumpulkan semua stream valid (ada url-nya)
       const rawStreams = Array.isArray(data?.streams)
         ? data.streams.filter((s) => s && typeof s.url === "string" && s.url.length > 0)
         : [];
 
-      // Urutkan bandwidth tertinggi ke terendah
       const sorted = rawStreams.sort(
         (a, b) => parseInt(b.BANDWIDTH || 0) - parseInt(a.BANDWIDTH || 0)
       );
@@ -362,7 +403,6 @@ function LiveStream() {
         setAvailableStreams(sorted);
       }
 
-      // Prioritas URL: stream_url root → bandwidth tertinggi → stream pertama
       const defaultUrl =
         (typeof data?.stream_url === "string" && data.stream_url.length > 0
           ? data.stream_url
@@ -411,16 +451,33 @@ function LiveStream() {
       }).catch(() => {});
 
       if (slugMode) {
-        // ShowId di-hardcode
-        const showId = "SH3401";
+        // ── Ambil showId dari IDN Plus API (status: live) ──────────────────
+        let resolvedShowId = null;
 
-        let result = await fetchShowStream(showId);
+        const idnShowId = await fetchIdnPlusLiveShowId();
 
-        // Retry sekali jika gagal (mungkin API lambat)
+        if (idnShowId) {
+          console.log("Menggunakan showId dari IDN Plus API:", idnShowId);
+          resolvedShowId = idnShowId;
+        } else {
+          // Fallback: gunakan showId hardcode jika tidak ada yang live
+          console.warn("Tidak ada IDN Plus show yang live, fallback ke showId hardcode");
+          resolvedShowId = "SH3401";
+        }
+
+        let result = await fetchShowStream(resolvedShowId);
+
+        // Retry sekali jika gagal
         if (!result || !result.url) {
           console.warn("fetchShowStream: retry setelah 2 detik...");
           await new Promise((r) => setTimeout(r, 2000));
-          result = await fetchShowStream(showId);
+          result = await fetchShowStream(resolvedShowId);
+        }
+
+        // Jika masih gagal dan tadi pakai IDN showId, coba fallback hardcode
+        if ((!result || !result.url) && idnShowId && resolvedShowId !== "SH3401") {
+          console.warn("fetchShowStream: IDN showId gagal, mencoba fallback hardcode SH3401...");
+          result = await fetchShowStream("SH3401");
         }
 
         if (!result || !result.url) {
@@ -432,14 +489,25 @@ function LiveStream() {
         setHlsUrl(result.url);
         setStreamData({
           playbackId,
-          title:    result.title || "Live Stream JKT48",
+          title:    idnLiveShow?.title || result.title || "Live Stream JKT48",
           viewerId: "viewer-" + Date.now(),
         });
 
-        // Update show info dari hasil API jika ada
+        // Update show info dari IDN Plus jika ada
+        if (idnLiveShow) {
+          setShowInfo({
+            title:  idnLiveShow.title,
+            showId: resolvedShowId,
+          });
+        }
+
+        // Fetch members dari showId yang berhasil
         if (result.showId) {
           fetchShowMembers(result.showId);
+        } else {
+          fetchShowMembers(resolvedShowId);
         }
+
       } else {
         // Mux mode — langsung set streamData
         setStreamData({
@@ -455,7 +523,7 @@ function LiveStream() {
       setError("Terjadi kesalahan saat memuat stream. Silakan coba lagi.");
       setLoading(false);
     }
-  }, [playbackId]);
+  }, [playbackId, fetchIdnPlusLiveShowId, idnLiveShow]);
 
   const handleResolutionChange = (stream) => {
     if (!stream?.url) return;
@@ -565,6 +633,7 @@ function LiveStream() {
     setIsVerified(false); setShowVerification(true);
     setStreamData(null); setHlsUrl(""); setAvailableStreams([]);
     setVerificationData({ email: "", code: "" });
+    setIdnLiveShow(null);
   };
   const handleSendMessage = async (e) => {
     e.preventDefault();
@@ -597,7 +666,7 @@ function LiveStream() {
     );
   }
 
-  if (showVerification && !isVerified) {
+    if (showVerification && !isVerified) {
     return (
       <div className="verification-page">
         <div className="verification-container">
@@ -628,7 +697,10 @@ function LiveStream() {
                 <li>Session tetap aktif saat refresh halaman</li>
                 <li>
                   Punya membership monthly?{" "}
-                  <span style={{ color: "#DC1F2E", cursor: "pointer", fontWeight: 700 }} onClick={() => navigate("/login")}>
+                  <span
+                    style={{ color: "#DC1F2E", cursor: "pointer", fontWeight: 700 }}
+                    onClick={() => navigate("/login")}
+                  >
                     Login di sini
                   </span>
                 </li>
@@ -641,19 +713,22 @@ function LiveStream() {
     );
   }
 
-  if (loading) {
+  if (loading || fetchingIdnShow) {
     return (
       <div className="loading-container">
         <div className="loading-content">
           <div className="spinner-large"></div>
           <h2>Memuat live stream...</h2>
-          <p>Mengambil informasi show...</p>
+          <p>
+            {fetchingIdnShow
+              ? "Mencari show yang sedang live..."
+              : "Mengambil informasi show..."}
+          </p>
         </div>
       </div>
     );
   }
 
-  // Error hanya tampil jika benar-benar tidak ada streamData
   if (error && !streamData) {
     return (
       <div className="error-container">
@@ -674,7 +749,6 @@ function LiveStream() {
     );
   }
 
-  // Safeguard: streamData belum siap tapi tidak loading dan tidak error
   if (!streamData) {
     return (
       <div className="loading-container">
@@ -691,12 +765,49 @@ function LiveStream() {
     <div className="live-stream-page">
       <div className="stream-header">
         <button onClick={goBack} className="back-btn">← Kembali</button>
-        {showInfo && <div className="show-title"><span>{showInfo.title}</span></div>}
+
+        {/* Tampilkan info show dari IDN Plus jika ada, fallback ke showInfo */}
+        {(idnLiveShow || showInfo) && (
+          <div className="show-title">
+            <span>{idnLiveShow?.title || showInfo?.title}</span>
+            {idnLiveShow && (
+              <span
+                style={{
+                  marginLeft: "8px",
+                  background: "#DC1F2E",
+                  color: "#fff",
+                  fontSize: "10px",
+                  fontWeight: 700,
+                  padding: "2px 7px",
+                  borderRadius: "8px",
+                  letterSpacing: "1px",
+                  verticalAlign: "middle",
+                }}
+              >
+                LIVE
+              </span>
+            )}
+          </div>
+        )}
+
         {!hasMonthlymember && (
           <button onClick={handleLogout} className="logout-btn">Logout</button>
         )}
         {hasMonthlymember && (
-          <div style={{ display: "flex", alignItems: "center", gap: "6px", background: "#DC1F2E18", border: "1px solid #DC1F2E40", borderRadius: "20px", padding: "4px 12px", fontSize: "12px", fontWeight: 700, color: "#DC1F2E" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: "6px",
+              background: "#DC1F2E18",
+              border: "1px solid #DC1F2E40",
+              borderRadius: "20px",
+              padding: "4px 12px",
+              fontSize: "12px",
+              fontWeight: 700,
+              color: "#DC1F2E",
+            }}
+          >
             ★ MONTHLY
           </div>
         )}
@@ -708,7 +819,7 @@ function LiveStream() {
             {isSlugMode && hlsUrl ? (
               <HlsPlayer
                 src={hlsUrl}
-                title={streamData.title}
+                title={idnLiveShow?.title || streamData.title}
                 streams={availableStreams}
                 onResolutionChange={handleResolutionChange}
               />
@@ -716,11 +827,57 @@ function LiveStream() {
               <MuxPlayer
                 streamType="live"
                 playbackId={streamData.playbackId}
-                metadata={{ video_title: streamData.title, viewer_user_id: streamData.viewerId }}
+                metadata={{
+                  video_title:    streamData.title,
+                  viewer_user_id: streamData.viewerId,
+                }}
                 autoPlay
               />
             )}
           </div>
+
+          {/* Info tambahan dari IDN Plus */}
+          {idnLiveShow && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "12px",
+                padding: "10px 14px",
+                background: "rgba(220,31,46,0.07)",
+                borderRadius: "8px",
+                margin: "10px 0",
+                border: "1px solid rgba(220,31,46,0.15)",
+              }}
+            >
+              {idnLiveShow.image_url && (
+                <img
+                  src={idnLiveShow.image_url}
+                  alt={idnLiveShow.title}
+                  style={{
+                    width: "54px",
+                    height: "54px",
+                    borderRadius: "8px",
+                    objectFit: "cover",
+                    flexShrink: 0,
+                  }}
+                />
+              )}
+              <div>
+                <div style={{ fontWeight: 700, fontSize: "14px", color: "#fff" }}>
+                  {idnLiveShow.title}
+                </div>
+                <div style={{ fontSize: "12px", color: "rgba(255,255,255,0.55)", marginTop: "2px" }}>
+                  👁 {idnLiveShow.view_count?.toLocaleString() || 0} penonton
+                  {idnLiveShow.idnliveplus?.description && (
+                    <span style={{ marginLeft: "10px" }}>
+                      📝 {idnLiveShow.idnliveplus.description}
+                    </span>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
 
           {members.length > 0 && (
             <div className="members-section">
@@ -729,7 +886,10 @@ function LiveStream() {
                 <span className="member-count">{members.length} Member</span>
               </div>
               {loadingMembers ? (
-                <div className="members-loading"><div className="spinner"></div><p>Memuat lineup...</p></div>
+                <div className="members-loading">
+                  <div className="spinner"></div>
+                  <p>Memuat lineup...</p>
+                </div>
               ) : (
                 <div className="members-grid">
                   {members.map((member) => (
@@ -743,13 +903,17 @@ function LiveStream() {
             </div>
           )}
 
-          <div className="stream-footer"><p>POWERED BY JKT48Connect</p></div>
+          <div className="stream-footer">
+            <p>POWERED BY JKT48Connect</p>
+          </div>
         </div>
 
         <div className="chat-sidebar">
           <div className="chat-header">
             <span>Live Chat</span>
-            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)" }}>{chatMessages.length} Pesan</span>
+            <span style={{ fontSize: "12px", color: "rgba(255,255,255,0.5)" }}>
+              {chatMessages.length} Pesan
+            </span>
           </div>
 
           <div className="chat-messages">
@@ -767,7 +931,11 @@ function LiveStream() {
                     )}
                     {msg.username}
                     {msg.bluetick && (
-                      <span className="bluetick-icon" title="Verified" style={{ display: "inline-flex", marginLeft: "4px" }}>
+                      <span
+                        className="bluetick-icon"
+                        title="Verified"
+                        style={{ display: "inline-flex", marginLeft: "4px" }}
+                      >
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor">
                           <path d="M22.5 12.5c0-1.58-.875-2.95-2.148-3.6.154-.435.238-.905.238-1.4 0-2.21-1.71-3.998-3.918-3.998-.47 0-.92.084-1.336.25C14.818 2.415 13.51 1.5 12 1.5s-2.816.917-3.337 2.25c-.416-.165-.866-.25-1.336-.25-2.21 0-3.918 1.79-3.918 4 0 .495.084.965.238 1.4-1.273.65-2.148 2.02-2.148 3.6 0 1.46.726 2.75 1.83 3.444-.06.315-.09.64-.09.966 0 2.21 1.71 3.998 3.918 3.998.53 0 1.04-.1 1.51-.282.825 1.155 2.15 1.924 3.63 1.924s2.805-.767 3.63-1.924c.47.182.98.282 1.51.282 2.21 0 3.918-1.79 3.918-4 0-.325-.03-.65-.09-.966 1.105-.694 1.83-1.984 1.83-3.444z" fill="#1DA1F2"/>
                           <path d="M10.42 16.273L6.46 12.31l1.41-1.414 2.55 2.548 6.42-6.42 1.414 1.415-7.834 7.834z" fill="white"/>
@@ -795,8 +963,21 @@ function LiveStream() {
                   className="chat-input"
                   maxLength={200}
                 />
-                <button type="submit" className="chat-send-btn" disabled={!chatInput.trim()}>
-                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                <button
+                  type="submit"
+                  className="chat-send-btn"
+                  disabled={!chatInput.trim()}
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  >
                     <line x1="22" y1="2" x2="11" y2="13"></line>
                     <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
                   </svg>
@@ -805,9 +986,13 @@ function LiveStream() {
             ) : (
               <div className="chat-disabled-overlay">
                 Hanya bisa melihat chat.<br />
-                <a href="/login" onClick={(e) => { e.preventDefault(); navigate("/login"); }}>
+                <a
+                  href="/login"
+                  onClick={(e) => { e.preventDefault(); navigate("/login"); }}
+                >
                   Login JKT48Connect
-                </a> untuk ikut komen.
+                </a>{" "}
+                untuk ikut komen.
               </div>
             )}
           </div>
