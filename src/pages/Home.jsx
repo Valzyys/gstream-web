@@ -2,7 +2,7 @@ import { useEffect, useState, useRef, useCallback } from "react";
 import "../styles/home.css";
 
 // ── API Config ──────────────────────────────────────────────────────────────
-const API_BASE = "https://v2.jkt48connect.com/api";
+const API_BASE = "https://v5.jkt48connect.com/api";
 const API_KEY = "JKTCONNECT";
 const MUX_API = `${API_BASE}/mux/live-streams?apikey=${API_KEY}&username=vzy&password=vzy`;
 const IDN_PLUS_API = `${API_BASE}/jkt48/idnplus?apikey=${API_KEY}`;
